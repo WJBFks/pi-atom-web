@@ -230,19 +230,26 @@ test("turn groups skip turns without middle steps and break on other roles", () 
   assert.equal(withNotice[1].message.role, "notification");
 });
 
-test("turn group items never depend on streaming state", () => {
+test("only the last group of a running session defaults to expanded", () => {
   const messages = [
     {
       id: "a1",
       role: "assistant",
       content: [{ type: "toolCall", id: "t1", name: "bash", arguments: {} }],
     },
+    { id: "n1", role: "notification", level: "info", content: "通知" },
+    {
+      id: "a2",
+      role: "assistant",
+      content: [{ type: "toolCall", id: "t2", name: "bash", arguments: {} }],
+    },
   ];
-  const items = groupMessages(messages);
-  // 分组一律默认收起：条目里不携带任何“仍在生成”之类的状态
-  assert.deepEqual(Object.keys(items[0]).sort(), ["group", "kind"]);
-  assert.equal(items[0].group.key, "turn-a1");
-  assert.equal(items[0].group.title, "1 次工具调用");
+  // 执行中：只有最后一轮默认展开，之前已结束的轮次保持收起
+  const running = groupMessages(messages, { running: true });
+  assert.equal(running[0].running, false);
+  assert.equal(running[2].running, true);
+  // 全部结束后：没有任何分组默认展开
+  assert.equal(groupMessages(messages)[2].running, false);
 });
 
 test("sub-second durations use a readable collapsed label and retain milliseconds when expanded", () => {

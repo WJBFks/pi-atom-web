@@ -427,10 +427,10 @@ test("tool input, progress and final result share one card with final timing", a
   const errors = await open(page, web);
   await expect(page.locator(".tool-block")).toHaveCount(1);
   await expect(page.locator(".tool-block")).toHaveClass(/disclosure-block/);
-  // 中间过程默认收进按轮折叠块，先展开这一轮再操作卡片
-  await expect(page.locator(".turn-group > summary")).toHaveCount(1);
-  await page.locator(".turn-group > summary").click();
-  await page.locator(".tool-block summary").click();
+  // 展开工具卡：直接改 DOM，不受它是否被按轮折叠块收起影响
+  await page.locator(".tool-block").first().evaluate((node) => {
+    node.open = true;
+  });
   await expect(page.locator(".tool-block .code-source code")).toContainText(
     "README.md",
   );
@@ -541,7 +541,7 @@ test("skill reads render as a purple skill card with the skill name", async ({
   expect(errors).toEqual([]);
 });
 
-test("turn groups collapse the middle steps and stay collapsed while streaming", async ({
+test("turn groups expand while the turn runs and collapse once it ends", async ({
   page,
   web,
 }) => {
@@ -581,12 +581,17 @@ test("turn groups collapse the middle steps and stay collapsed while streaming",
   await expect(group).toHaveCount(1);  await expect(group.locator(".turn-title")).toHaveText(
     "2 次思考过程 · 1 次工具调用",
   );
-  // 即使会话仍在生成，也一律保持收起
-  await expect(group).not.toHaveAttribute("open", "");
+  // 执行中默认展开：折叠区里的卡片可见
+  await expect(group).toHaveAttribute("open", "");
+  await expect(group.locator(".thinking-block").first()).toBeVisible();
   // 最终输出留在折叠块之外
   await expect(page.locator("#message-history > .message").last()).toContainText(
     "最终答案",
   );
+  // 中间过程结束（不再有流式消息与运行中的工具）后自动折叠
+  web.publish({ liveMessage: null, tools: [] });
+  await expect(group).not.toHaveAttribute("open", "");
+  // 仍然可以手动展开
   await page.locator(".turn-group > summary").click();
   await expect(group).toHaveAttribute("open", "");
   await expect(group.locator(".thinking-block").first()).toBeVisible();

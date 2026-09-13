@@ -91,12 +91,12 @@ export function buildTurnGroup(messages) {
 }
 
 // 把扁平的 messages 拆成可直接渲染的条目：单条消息，或一轮的折叠分组 + 它露出的最终输出。
-// 分组一律默认收起（是否展开只由用户手动操作决定，见 disclosures）。
-export function groupMessages(messages) {
+// running 表示当前会话仍在生成中：最后一个分组据此默认展开，整轮结束后自动收起。
+export function groupMessages(messages, { running = false } = {}) {
   const list = messages || [];
   const items = [];
   let run = [];
-  const flush = () => {
+  const flush = (isLast) => {
     const group = run.length ? buildTurnGroup(run) : null;
     run = [];
     if (!group) return;
@@ -106,7 +106,7 @@ export function groupMessages(messages) {
         items.push({ kind: "message", message });
       return;
     }
-    items.push({ kind: "group", group });
+    items.push({ kind: "group", group, running: running && isLast });
     if (group.finalMessage)
       items.push({
         kind: "message",
@@ -119,9 +119,9 @@ export function groupMessages(messages) {
       run.push(message);
       continue;
     }
-    flush();
+    flush(false);
     items.push({ kind: "message", message });
   }
-  flush();
+  flush(true);
   return items;
 }

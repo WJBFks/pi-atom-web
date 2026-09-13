@@ -28,15 +28,15 @@ export default defineComponent({
           : messageId(entry.message) ?? `m${index}`;
         return render(entry.message, key);
       }
-      const { group } = entry;
+      const { group, running } = entry;
       return h(
         TurnGroup,
         {
           key: group.key,
           blockKey: group.key,
           title: group.title,
-          // 一律默认收起；只有用户手动展开过才用记录下来的状态。
-          open: conversation.disclosure(group.key),
+          // 执行中默认展开、结束后自动收起；用户手动操作过则以记录状态为准（在 TurnGroup 内处理）
+          running,
         },
         {
           default: () =>
@@ -53,7 +53,11 @@ export default defineComponent({
       // 执行轨迹视图保持平铺，不做按轮折叠。
       const entries = props.trace
         ? messages.map((message) => ({ kind: "message", message }))
-        : groupMessages(messages);
+        : groupMessages(messages, {
+            running:
+              Boolean(conversation.liveMessage) ||
+              conversation.tools.length > 0,
+          });
       return h("div", { id: "message-history" }, entries.map(renderEntry));
     };
   },
