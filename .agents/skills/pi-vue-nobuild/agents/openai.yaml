@@ -1,0 +1,3 @@
+interface:
+  display_name: "Pi Vue No-Build"
+  short_description: "Enforce the project no-build Vue architecture"
