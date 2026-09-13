@@ -5,11 +5,11 @@
 - `web/api/` 负责单连接、鉴权、序号检查和取消；`web/stores/` 分离 session/conversation/composer/dialogs。组件拥有 DOM、观察器、计时器与终端实例，卸载必须清理。
 - 验证包含 `npm run check`、`npm test`、独立 `npm run test:browser`；check 递归检查源文件，Node 测试与浏览器测试分开，禁止零测试假成功。浏览器测试使用内存 fixture 与本地服务器，不调用真实模型或写真实会话。
 
-- `.agents/skills/`：Codex 项目级技能目录，当前包含 `pi-vue-nobuild`、`frontend-design`、`vue-best-practices`、`pinia`、`vue-router-best-practices`、`node`、`web-design-guidelines`、`accessibility-compliance`、`responsive-design`、`interaction-design`。这些技能供 Codex 在本项目中自动发现；不得放入供 pi agent 使用的 `.pi/skills/`。其中 `pi-vue-nobuild` 是本项目架构约束，优先于通用 Vue 技能中关于 SFC、构建工具或外部 CDN 的建议。
-- 产品：pi-atom 系列的当前 TUI 会话 Web 扩展，命令 `/web`；严格一对一绑定宿主进程当前会话。
+- `.agents/skills/`：Codex 项目级技能目录，当前包含 `pi-vue-nobuild`、`pi-package-compatibility`、`frontend-design`、`vue-best-practices`、`pinia`、`vue-router-best-practices`、`node`、`web-design-guidelines`、`accessibility-compliance`、`responsive-design`、`interaction-design`。这些技能供 Codex 在本项目中自动发现；不得放入供 pi agent 使用的 `.pi/skills/`。其中 `pi-vue-nobuild` 是浏览器架构约束，`pi-package-compatibility` 约束 `extensions/packages/` 与 `web/packages/` 的第三方兼容边界。
+- 产品：pi-atom 系列的当前 TUI 会话 Web 扩展，命令 `/web` 与 `/web-wlan`；严格一对一绑定宿主进程当前会话。
 - 不创建独立 agent、项目管理或会话管理系统。使用扩展 API 收发消息与订阅事件。
-- `extensions/index.ts`：入口、`/web` 与 `/web stop`、消息桥接、生命周期；通过 `pi.getCommands()` 提供命令列表，并补充 Web 命令 `/reload`、`/model`、`/session`、`/copy`、`/name`、`/compact`。`/reload` 分发到隐藏内部命令 `pi-atom-web-reload`，只在命令 handler 收到的 `ExtensionCommandContext` 上调用 `reload()`；严禁在会被事件替换的普通 `ExtensionContext` 上调用。`/model`、`/session`、`/copy` 在浏览器本地复用现有 UI；`/name` 使用 `pi.setSessionName()`；`/compact` 使用 `context.compact()`。进程内 handoff 复用端口/凭证并在新实例的 `session_start` 恢复服务。其余已知命令使用 `expandPromptTemplates: true` 分发，未知命令不得误发模型。
-- `extensions/server.ts`：仅 loopback HTTP 服务、随机凭证、Host/Origin 校验、SSE、静态资源；仅 `/reload` 进程内交接可指定旧端口与凭证。
+- `extensions/index.ts`：入口、`/web`、`/web-wlan` 与 `/web stop`、消息桥接、生命周期；通过 `pi.getCommands()` 提供命令列表，并补充 Web 命令 `/reload`、`/model`、`/session`、`/copy`、`/name`、`/compact`。`/reload` 分发到隐藏内部命令 `pi-atom-web-reload`，只在命令 handler 收到的 `ExtensionCommandContext` 上调用 `reload()`；严禁在会被事件替换的普通 `ExtensionContext` 上调用。`/model`、`/session`、`/copy` 在浏览器本地复用现有 UI；`/name` 使用 `pi.setSessionName()`；`/compact` 使用 `context.compact()`。进程内 handoff 复用端口/凭证并在新实例的 `session_start` 恢复服务。其余已知命令使用 `expandPromptTemplates: true` 分发，未知命令不得误发模型。
+- `extensions/server.ts`：默认仅 loopback HTTP 服务、随机凭证、Host/Origin 校验、SSE、静态资源；仅 `/reload` 进程内交接可指定旧端口与凭证。`/web-wlan` 用 `connection.host === "0.0.0.0"` 让服务监听所有网卡供局域网访问：URL 取第一个非内部网卡地址（跳过 169.254/16 链路本地与 198.18/15、198.19/15 代理 fake-IP 段，实体网卡排在 virtual/vmware/vEthernet/WSL/tun 等虚拟网卡之前）、其余网卡一并列出且**每张都带凭证完整地址**，`host` 随 `connection` 交给 `/reload` 交接；该模式**不校验 Host/Origin**（凭证是唯一凭据），已有服务时就地重绑并复用端口与凭证；TUI 会把每张网卡都列成带凭证的完整地址（凭证在 URL 的 `#` 片段里，只输 IP:端口会被网页提示缺少凭证），局域网模式的安全加固见文末「待办」。
 - `web/`：页面、样式、浏览器交互（含 `/` 前缀筛选、键盘/点击补全）；Markdown 必须清洗；不能把不可信内容直接作为 HTML。
 - Markdown 围栏代码统一由 `codeBlock()` 渲染：highlight.js 高亮、语言、总行数、独立行号 gutter 和复制按钮；正文及行号不得自动换行，复制只能读取 `.code-source code`，不能包含 gutter。工具 Input 必须复用该组件并显式使用 JSON。行内代码必须由 `.body :not(pre)>code` 提供与代码块同一套设计语言的标记：`--panel` 底、`--border` 描边、5px 圆角、`1px 5px` 内边距、`overflow-wrap:anywhere` 与 `box-decoration-break:clone`（全站基础字体已是等宽字体栈，只靠字体无法与正文区分）；围栏代码块内的 `code` 不得再套这层外框。highlight.js 使用 `@highlightjs/cdn-assets` 的本地浏览器构建，由 server.ts 暴露，禁止连接外部 CDN。
 - 全页面及 xterm 统一使用 `--font-mono` 对应的字体栈：Noto Sans Mono、JetBrains Mono、Fira Code、Consolas、ui-monospace、Microsoft YaHei、monospace；局部组件不得覆盖成其他字体栈。Noto Sans Mono 使用 `@fontsource-variable/noto-sans-mono` 的本地 WOFF2，由 `web/fonts.css` 声明、`server.ts` 提供；禁止连接外部字体服务。
@@ -53,10 +53,18 @@
 
 - 扩展请求面板位于 `.compose-wrap` 内、输入框正上方，与输入框同宽；仅外层面板限制高度并滚动，选项列表和 pre 不再独立滚动。
 
-- `extensions/ask-user.ts`：专门适配 @juicesharp/rpiv-ask-user-question 2.6.2；工具参数与公开事件双重匹配、QuestionnaireSession 工厂守卫，直接构造原 QuestionnaireResult，不解析终端文本、不模拟按键答题。
-- `web/components/dialogs/AskUserForm.js`：1–4 题结构化表单，单选/多选/多行自由回答/备注/单选 Markdown 预览/核对与部分提交/取消/收起；草稿按请求存于标签页 sessionStorage，结束清理。两端未提交草稿独立，最终先完成者生效。
-- 标准 UI 请求走通用桥；未知 custom 只使用终端兜底。已移除编号菜单启发式识别模块与相应测试。
+- `extensions/packages/` 与 `web/packages/` 按 npm package 名组织 Pi 第三方兼容；后端 registry 只在观察到 package 的唯一公开事件后动态导入对应模块，Web registry 只在收到带 `packageId` 的实际请求后动态导入组件和本地 CSS。未安装、未触发或未知 package 不生效、不报错、不警告；标准 UI 请求继续走通用桥，未知 custom 使用终端兜底。
+- `extensions/packages/@juicesharp/rpiv-ask-user-question/`：适配 2.9.0 公开 prompt 事件与 QuestionnaireResult；工具参数和事件双重匹配，并识别 2.9.0 间接 `Session` 构造及旧版 `QuestionnaireSession` 工厂，直接构造包含答案、每题备注、preview、全局备注和取消状态的结果，不解析终端文本、不模拟按键。
+- `web/packages/@juicesharp/rpiv-ask-user-question/`：1–4 题结构化表单，覆盖单选、多选、多行自由回答、每题备注、单选 Markdown preview、多题 tab、核对、未答提示、部分提交、全局备注、取消、收起和 sessionStorage 草稿恢复。两端未提交草稿独立，最终先完成者生效。
 
 - ask_user_question 使用紧凑独立卡片，选项垂直排列；自由回答是同款末尾选项卡，只显示随题型变化的选择框（单选 radio、多选 checkbox）与内嵌文本框，不显示重复标题。单选 focus/input 选择 custom 并清除普通选项；多选 focus/input 只设置 `kind:multi, custom:true`，保留 `options`，提交时非空 text 追加到 selected。自由回答说明与备注标题放入各自 placeholder。备注按需展开；清除与取消按钮放到底部操作栏右侧，和导航/提交集中排列；单题直接提交，多题保留核对。卡片随内容自然增高，最大为对话区域可用高度，内容过长仅内容区滚动，页头与操作栏不随其滚走。任何表单重建必须保存并恢复页面、对话、请求面板及 ask-content 的滚动位置，禁止交互后跳顶。
 - 问卷顶栏必须显示当前问题的原始 `question.header`，包括单题问卷；题号/总数/题型作为 muted 次要信息，核对页显示“核对答案”，不得用固定文案覆盖 header。
 - 单选 preview 的选择区与预览区使用 `.ask-option` 统一外框，选中边框/背景作用于整个组合，不允许上下块边框重叠或断裂。折叠条使用紧凑样式并紧贴对应选项；折叠时不继承通用 details 的大间距，展开后再为正文增加间距。展开项索引保存在问卷本地 `previews` Set，任何表单重建均须恢复。
+
+## 待办
+
+- **`/web-wlan`（监听 `0.0.0.0`）的安全与校验**：当前按约定先不做，凭证（URL 片段里的随机 token）是唯一凭据。待补：
+  - 恢复 Host/Origin 白名单：只放行回环与本机网卡地址（防 DNS rebinding / CSRF），并决定是否允许用主机名访问。
+  - 静态资源是否也要求凭证；局域网请求是否只放行 SSE 与 action。
+  - 闲置回收策略（如 N 分钟无活动自动退回仅 loopback）与 TUI 风险提示的强度。
+  - 局域网访问的审计与限流（记录来源 IP、限制失败尝试）。

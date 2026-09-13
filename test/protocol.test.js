@@ -114,6 +114,45 @@ test("protocol accepts bounded Web-only timing and disclosure state", () => {
   );
 });
 
+test("protocol validates package-scoped questionnaire requests", () => {
+  const request = {
+    id: "ask-1",
+    sessionId: "session-a",
+    packageId: "@juicesharp/rpiv-ask-user-question",
+    kind: "ask_user_question",
+    toolCallId: "call-1",
+    title: "自定义扩展界面",
+    lines: [],
+    questions: [{
+      header: "方案",
+      question: "选择方案？",
+      options: [
+        { label: "A", description: "甲", preview: "**A**" },
+        { label: "B", description: "乙" },
+      ],
+    }],
+  };
+  assert.equal(
+    validateSnapshot({ ...snapshot, requests: [request] }).requests[0],
+    request,
+  );
+  assert.throws(() =>
+    validateSnapshot({
+      ...snapshot,
+      requests: [{ ...request, sessionId: undefined }],
+    }),
+  );
+  assert.throws(() =>
+    validateSnapshot({
+      ...snapshot,
+      requests: [{
+        ...request,
+        questions: [{ ...request.questions[0], options: [] }],
+      }],
+    }),
+  );
+});
+
 test("snapshot accepts Pi bashExecution entries without content", () => {
   const value = {
     ...snapshot,

@@ -7,7 +7,7 @@ import {
   reactive,
   ref,
 } from "vue";
-import MarkdownContent from "../conversation/MarkdownContent.js";
+import MarkdownContent from "../../../components/conversation/MarkdownContent.js";
 import {
   normalizeAnswers,
   blankAnswer,
@@ -32,6 +32,10 @@ export default defineComponent({
         previews: new Set(),
         notes: new Set(),
         answers: normalizeAnswers(props.request.questions, saved?.answers),
+        globalNote:
+          typeof saved?.globalNote === "string"
+            ? saved.globalNote.slice(0, 32000)
+            : "",
       });
     for (const [index, answer] of state.answers.entries())
       if (answer.notes) state.notes.add(index);
@@ -40,7 +44,10 @@ export default defineComponent({
       try {
         sessionStorage.setItem(
           storageKey,
-          JSON.stringify({ answers: state.answers }),
+          JSON.stringify({
+            answers: state.answers,
+            globalNote: state.globalNote,
+          }),
         );
       } catch {}
     };
@@ -105,6 +112,7 @@ export default defineComponent({
         emit("submit", {
           id: props.request.id,
           draft: serializeAnswers(state.answers),
+          globalNote: state.globalNote,
           cancel,
         });
     };
@@ -165,6 +173,24 @@ export default defineComponent({
               `尚未回答：${missing.join("、")}。可返回补充，或仅提交已填写答案；备注本身不算作答。`,
             ),
           );
+        children.push(
+          h("label", { class: "ask-global-note" }, [
+            h("span", "全局备注"),
+            h("textarea", {
+              rows: 2,
+              maxlength: 32000,
+              disabled: props.pending,
+              "data-ask-global-note": "",
+              "aria-label": "全局备注",
+              placeholder: "为整个问卷添加备注（可选）",
+              value: state.globalNote,
+              onInput: (event) =>
+                update(() => {
+                  state.globalNote = event.target.value;
+                }),
+            }),
+          ]),
+        );
       } else {
         children.push(
           h("h3", question.question),

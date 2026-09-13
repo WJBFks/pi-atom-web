@@ -7,8 +7,10 @@ import atomWeb from "../extensions/index.ts";
 import {
   buildAskUserResult,
   createAskUserAdapter,
-} from "../extensions/ask-user.ts";
+} from "../extensions/packages/@juicesharp/rpiv-ask-user-question/index.ts";
+import { createPackageCompatibilityRegistry } from "../extensions/packages/registry.ts";
 import { startServer } from "../extensions/server.ts";
+import { bridgeDialogs } from "../extensions/dialogs.ts";
 
 test("reload runs on command context even after ordinary event replaces context", async () => {
   const commands = new Map(),
@@ -112,7 +114,7 @@ test("multi answer preserves ordinary selections and appends custom text", () =>
         text: "C",
         notes: "备注",
       },
-    ]),
+    ], false, "全局备注"),
     {
       answers: [
         {
@@ -125,12 +127,29 @@ test("multi answer preserves ordinary selections and appends custom text", () =>
         },
       ],
       cancelled: false,
+      globalNote: "全局备注",
     },
   );
   assert.throws(
     () => buildAskUserResult(questions, [{ kind: "multi", options: [0, 0] }]),
     /多选/,
   );
+});
+
+test("package compatibility stays inactive until its tool is observed", async () => {
+  const listeners = new Map();
+  const registry = createPackageCompatibilityRegistry({
+    events: { on: (name, handler) => listeners.set(name, handler) },
+  });
+  assert.equal(registry.activePackageIds().length, 0);
+  registry.start({ toolName: "read", toolCallId: "read-1", args: {} });
+  assert.equal(registry.activePackageIds().length, 0);
+  const questions = [{ header: "选择", question: "选择？", options: [{ label: "A", description: "A" }, { label: "B", description: "B" }] }];
+  registry.start({ toolName: "ask_user_question", toolCallId: "ask-1", args: { questions } });
+  listeners.get("rpiv:ask-user:prompt")({ questions });
+  const claim = await registry.takeCustom(() => "QuestionnaireSession");
+  assert.equal(claim.packageId, "@juicesharp/rpiv-ask-user-question");
+  assert.equal(claim.request.kind, "ask_user_question");
 });
 
 test("ask adapter does not claim unrelated or ambiguous custom UI factories", () => {
@@ -166,6 +185,108 @@ test("ask adapter does not claim unrelated or ambiguous custom UI factories", ()
     adapter.take(() => "QuestionnaireSession"),
     undefined,
   );
+});
+
+test("ask adapter recognizes the rpiv 2.9 QuestionnaireSession factory shape", () => {
+  const adapter = createAskUserAdapter();
+  const questions = [
+    {
+      header: "布局",
+      question: "对话区现在的紧凑程度满意吗？",
+      options: [
+        { label: "满意", description: "保持当前布局" },
+        { label: "再紧凑一些", description: "继续缩小间距" },
+      ],
+    },
+  ];
+  adapter.start({
+    toolName: "ask_user_question",
+    toolCallId: "rpiv-2.9",
+    args: { questions },
+  });
+  adapter.prompt({ questions });
+
+  const Session = class {};
+  const sessionRef = { current: null };
+  const factory = (tui, theme, keybindings, done) => {
+    const session = new Session({ tui, theme, keybindings, done });
+    sessionRef.current = session;
+    return session.component;
+  };
+
+  const selected = adapter.take(factory);
+  assert.equal(selected?.packageId, "@juicesharp/rpiv-ask-user-question");
+  assert.equal(selected?.toolCallId, "rpiv-2.9");
+});
+
+test("dialog bridge returns the package result contract including global notes", async () => {
+  const adapter = createAskUserAdapter();
+  const questions = [{
+    header: "方案",
+    question: "选择方案？",
+    options: [
+      { label: "A", description: "甲", preview: "**A**" },
+      { label: "B", description: "乙" },
+    ],
+  }];
+  adapter.start({
+    toolName: "ask_user_question",
+    toolCallId: "bridge-ask",
+    args: { questions },
+  });
+  adapter.prompt({
+    questions: [{
+      ...questions[0],
+      options: questions[0].options.map(option => ({
+        label: option.label,
+        description: option.description,
+        hasPreview: Boolean(option.preview),
+      })),
+    }],
+  });
+  const ui = {
+    custom: async (factory) =>
+      new Promise(async resolve => {
+        await factory(
+          { requestRender() {} },
+          {},
+          {},
+          resolve,
+        );
+      }),
+  };
+  const dialogs = bridgeDialogs(ui, () => "package-session", () => {}, {
+    takeCustom: async factory => adapter.take(factory),
+  });
+  const resultPromise = ui.custom(
+    async function QuestionnaireSession() {
+      return { render: () => [], handleInput() {} };
+    },
+  );
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const [request] = dialogs.list();
+  assert.equal(request.packageId, "@juicesharp/rpiv-ask-user-question");
+  dialogs.respond(
+    request.id,
+    {
+      draft: [{ kind: "option", option: 0, notes: "说明" }],
+      globalNote: "整体备注",
+    },
+    false,
+  );
+  assert.deepEqual(await resultPromise, {
+    answers: [{
+      questionIndex: 0,
+      question: "选择方案？",
+      kind: "option",
+      answer: "A",
+      preview: "**A**",
+      notes: "说明",
+    }],
+    cancelled: false,
+    globalNote: "整体备注",
+  });
+  dialogs.close();
 });
 
 test("real bridge updates statistics on same-session branch navigation and rejects stale actions", async () => {

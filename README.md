@@ -2,7 +2,7 @@
 
 ## 项目级 Codex Skills
 
-项目在 `.agents/skills/` 内提供 10 个 Codex 技能：`pi-vue-nobuild`、`frontend-design`、`vue-best-practices`、`pinia`、`vue-router-best-practices`、`node`、`web-design-guidelines`、`accessibility-compliance`、`responsive-design`、`interaction-design`。它们只作用于本项目；重新打开任务后由 Codex 自动发现。`pi-vue-nobuild` 固定浏览器原生 ESM、Vue 3、Pinia、Vue Router 与无前端构建步骤的架构，优先于通用技能中的冲突建议。
+项目在 `.agents/skills/` 内提供 11 个 Codex 技能：`pi-vue-nobuild`、`pi-package-compatibility`、`frontend-design`、`vue-best-practices`、`pinia`、`vue-router-best-practices`、`node`、`web-design-guidelines`、`accessibility-compliance`、`responsive-design`、`interaction-design`。它们只作用于本项目；重新打开任务后由 Codex 自动发现。`pi-vue-nobuild` 固定浏览器原生 ESM、Vue 3、Pinia、Vue Router 与无前端构建步骤的架构；`pi-package-compatibility` 规定 Pi 第三方 package 的双端目录、按需激活、静默缺失、通用桥接和验证原则。
 
 pi-atom 系列的独立产品：在运行中的 pi TUI 输入 `/web`，打开当前会话的浏览器界面。网页与终端共享同一个 pi 进程、模型、上下文和对话；TUI 切换当前会话时网页跟随切换。
 
@@ -26,10 +26,13 @@ npm ci
 
 ```text
 /web
+/web-wlan
 /web stop
 ```
 
 `/web` 启动本机随机端口服务并打开浏览器，再次执行会复用服务。浏览器无法自动启动时，复制 TUI 显示的完整地址。`/web stop` 关闭网页服务；pi 退出或 reload 时也会关闭。
+
+`/web-wlan` 让服务监听 `0.0.0.0`，局域网内其它设备可用网卡地址打开同一会话；已有服务时会就地重绑并复用端口与凭证（已打开的页面不失效）。TUI 会把每张网卡都列成**带凭证的完整地址**，直接整条复制即可——凭证在 `#` 片段里，只输 `IP:端口` 会提示缺少连接凭证。该模式目前**不校验 Host/Origin**，请仅在可信网络使用；安全加固列在文末「待办」。
 
 Web UI 中可直接输入 `/reload`。请求经内部扩展命令取得 pi 的命令上下文并调用宿主 TUI 原生重载流程，随后以原端口和凭证恢复 `/web`；当前标签页自动重连，并在确认连接到新的扩展实例后自动刷新浏览器一次，不需要重新打开地址。生成期间不能重载。
 
@@ -96,7 +99,7 @@ npm run test:browser
 
 ## ask_user_question 专用适配
 
-已检查并实测本机 `@juicesharp/rpiv-ask-user-question` **2.6.2** 的参数、事件和结果协议。该工具始终优先使用结构化问卷，不再解析终端画面或模拟方向键来填写。
+已检查并实测本机 `@juicesharp/rpiv-ask-user-question` **2.9.0** 的参数、公开事件和结果协议。该工具始终优先使用结构化问卷，不解析终端画面或模拟方向键来填写。
 
 | 原扩展能力                  | Web 表现与返回语义                                                                                                                                                                        |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -105,6 +108,7 @@ npm run test:browser
 | 多选                        | 原生 checkbox；普通选项和自由回答可以同时选择，返回 `kind: multi`，selected 先按原选项顺序排列，再附加非空自由文本                                                                        |
 | 自由填写（所有题型）        | 多行文本框；单选题返回 `kind: custom` 并替代普通选项；多选题作为额外 selected 项，不清除普通选项；单选空文本按原协议返回 null                                                             |
 | 备注                        | 每题独立多行备注，附在对应答案的 notes；备注不把未答题变成已答                                                                                                                            |
+| 全局备注                    | 多题核对页提供整个问卷的多行备注；可单独提交，取消时也按 2.9.0 契约保留在 `details.globalNote`                                                                                              |
 | 单选 preview                | 选择区与预览区共用统一外框；使用紧贴选项的低高度折叠条，展开后安全渲染 Markdown/代码，支持逐项对比；表单重绘保留每项展开状态；选中后原始 preview 随答案返回；多选与自由回答不携带 preview |
 | 多题核对与修改              | 核对页列出答案、备注、未答项，可返回修改；允许显式提交部分答案；全未答由原工具按其既有逻辑判为未回答                                                                                      |
 | 取消                        | 返回 `{answers, cancelled:true}`，保留已填的有效部分；不返回 undefined，以免误触发原工具的 RPC 降级逻辑                                                                                   |
@@ -114,8 +118,16 @@ npm run test:browser
 
 网页与 TUI 的**未提交草稿独立**，不会逐键同步；最终先完成的一端生效。浏览器使用多行文本框完成编辑，TUI 的 Ctrl+G 外部编辑器与终端快捷键配置仍由原扩展负责。多语言题目原文保留，网页控件使用中文。
 
-实现：`extensions/ask-user.ts` 关联真实工具调用参数（含 preview）与公开 `rpiv:ask-user:prompt` 事件，再匹配当前版本的 QuestionnaireSession 工厂；`dialogs.ts` 把经过校验的 QuestionnaireResult 交给原 done 回调，原工具继续生成其标准返回文本、details 和完成事件。`web/components/dialogs/AskUserForm.js` 提供 Vue 表单和草稿管理。无需修改或打补丁到被适配扩展。
+兼容代码按 package 隔离在 `extensions/packages/@juicesharp/rpiv-ask-user-question/` 和 `web/packages/@juicesharp/rpiv-ask-user-question/`。后端只在观察到该扩展唯一的 `rpiv:ask-user:prompt` 公开事件后动态加载适配器；Web 只在收到对应 `packageId` 请求后动态加载 Vue 表单和专用 CSS。未安装或未触发时不加载、不生效、不报错、不警告。适配器关联真实工具参数（含 preview）与公开事件，再匹配当前 2.9.0 的间接 `Session` 工厂或旧版 `QuestionnaireSession` 工厂；通用 `dialogs.ts` 只处理 package claim，不包含问卷业务规则。无需修改或打补丁到被适配扩展。
 
 必须先启动 `/web` 再触发新问卷；已打开的旧 TUI 问卷不会被事后接管。若未来扩展更改工厂/协议而未匹配，保留原 custom 兜底，不把其他扩展的请求错认成问卷。
 
 专用问卷采用紧凑独立卡片，普通选项纵向排列；自由回答作为最后一张同款选项卡，仅显示随题型变化的选择框和带 placeholder 的输入框：单选题使用 radio，聚焦或输入会选中自由回答并取消普通选项；多选题使用 checkbox，聚焦或输入只勾选自由回答，可与普通选项并存。备注仍按需展开，说明同样使用 placeholder。“清除选择”和“取消问卷”集中在底部操作栏，与导航和提交按钮排列在一起。单题作答后可直接提交，多题保留核对页；问卷固定在输入框上方并随内容增高，达到可用高度后仅滚动问卷内容区。选项、页签和表单按钮引起局部重绘时保留当前滚动位置。
+
+## 待办
+
+- `/web-wlan`（监听 `0.0.0.0`）的安全与校验：当前按约定先不做，URL 片段里的随机凭证是唯一凭据。待补：
+  - 恢复 Host/Origin 白名单，只放行回环与本机网卡地址（防 DNS rebinding / CSRF），并决定是否允许主机名访问。
+  - 静态资源是否也要求凭证；局域网请求是否只放行 SSE 与 action。
+  - 闲置回收策略（如 N 分钟无活动自动退回仅 loopback）与 TUI 风险提示强度。
+  - 局域网访问的审计与限流（记录来源 IP、限制失败尝试）。

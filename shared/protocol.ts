@@ -113,6 +113,36 @@ function arrayOfObjects(value, name, identifier) {
       string(item[identifier] ?? item.id, `${name}.${identifier}`);
   }
 }
+function dialogRequest(value) {
+  const item = object(value, "request");
+  string(item.id, "request.id", { max: 1024 });
+  string(item.kind, "request.kind", { max: 128 });
+  sessionId(item.sessionId);
+  if ("packageId" in item) string(item.packageId, "request.packageId", { max: 512 });
+  if ("title" in item) string(item.title, "request.title", { empty: true, max: 4096 });
+  if ("questions" in item) {
+    if (!Array.isArray(item.questions) || item.questions.length < 1 || item.questions.length > 4)
+      fail("request.questions 无效");
+    for (const question of item.questions) {
+      object(question, "request.question");
+      string(question.question, "request.question.question", { max: 32000 });
+      string(question.header, "request.question.header", { max: 16 });
+      if (!Array.isArray(question.options) || question.options.length < 2 || question.options.length > 4)
+        fail("request.question.options 无效");
+      for (const option of question.options) {
+        object(option, "request.option");
+        string(option.label, "request.option.label", { max: 60 });
+        string(option.description, "request.option.description", { empty: true, max: 32000 });
+        if ("preview" in option)
+          string(option.preview, "request.option.preview", { empty: true, max: MAX_TEXT_LENGTH });
+      }
+      if ("multiSelect" in question && typeof question.multiSelect !== "boolean")
+        fail("request.question.multiSelect 无效");
+    }
+  }
+  json(item);
+  if (JSON.stringify(item).length > MAX_TEXT_LENGTH) fail("request 过长");
+}
 function timings(value, name) {
   const items = object(value, name);
   if (Object.keys(items).length > 500) fail(`${name} 过多`);
@@ -263,7 +293,8 @@ function validateField(key, value) {
       arrayOfObjects(value, key, "toolCallId");
       break;
     case "requests":
-      arrayOfObjects(value, key, "id");
+      if (!Array.isArray(value) || value.length > 64) fail("requests 必须是数组");
+      for (const item of value) dialogRequest(item);
       break;
     case "toolTimings":
     case "thinkingTimings":

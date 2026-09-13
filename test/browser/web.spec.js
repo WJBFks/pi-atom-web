@@ -110,6 +110,11 @@ test("loads local ESM modules under CSP without page errors", async ({
 }) => {
   const failures = await open(page, web);
   expect(failures).toEqual([]);
+  await expect(
+    page.locator(
+      'link[href="/packages/@juicesharp/rpiv-ask-user-question/style.css"]',
+    ),
+  ).toHaveCount(0);
 });
 
 test("renders arbitrary appendEntry data as a generic custom entry card", async ({
@@ -233,6 +238,8 @@ test("questionnaire preserves multi selections with custom text and submits plai
     requests: [
       {
         id: "ask-one",
+        sessionId: "session-browser",
+        packageId: "@juicesharp/rpiv-ask-user-question",
         kind: "ask_user_question",
         questions: [
           {
@@ -250,6 +257,11 @@ test("questionnaire preserves multi selections with custom text and submits plai
   });
   const errors = await open(page, web);
   await expect(page.locator(".ask-title")).toHaveText("选择功能");
+  await expect(
+    page.locator(
+      'link[href="/packages/@juicesharp/rpiv-ask-user-question/style.css"]',
+    ),
+  ).toHaveCount(1);
   await page.locator('[data-ask-option="0"]').check();
   await page.locator("[data-ask-text]").fill("其他");
   await expect(page.locator('[data-ask-option="0"]')).toBeChecked();
@@ -276,6 +288,8 @@ test("questionnaire previews survive selections and review displays partial answ
     requests: [
       {
         id: "ask-preview",
+        sessionId: "session-browser",
+        packageId: "@juicesharp/rpiv-ask-user-question",
         kind: "ask_user_question",
         questions: [
           {
@@ -306,9 +320,11 @@ test("questionnaire previews survive selections and review displays partial answ
   await page.getByRole("button", { name: "核对与提交" }).click();
   await expect(page.locator(".ask-review").first()).toContainText("A");
   await expect(page.locator(".ask-warning")).toContainText("尚未回答：补充");
+  await page.locator("[data-ask-global-note]").fill("整个问卷的补充说明");
   await page.locator("[data-ask-submit]").click();
   await expect.poll(() => web.actions.length).toBe(1);
   expect(web.actions[0].value.draft[1].kind).toBe("unanswered");
+  expect(web.actions[0].value.globalNote).toBe("整个问卷的补充说明");
 });
 
 test("generic request shows explanation and can cancel without an undefined protocol field", async ({
@@ -319,6 +335,7 @@ test("generic request shows explanation and can cancel without an undefined prot
     requests: [
       {
         id: "confirm-one",
+        sessionId: "session-browser",
         kind: "confirm",
         title: "确认",
         text: "这是需要用户确认的正文",
@@ -688,12 +705,15 @@ test("manual upward scroll immediately pauses following until returning to botto
     node.style.minHeight = "2400px";
   });
   await page.locator("#scroll").evaluate((node) => {
+    node.style.scrollBehavior = "auto";
     node.scrollTop = node.scrollHeight;
+    node.dispatchEvent(new Event("scroll"));
   });
   await expect(page.locator("#jump-to-bottom")).toHaveCount(0);
 
   const pausedTop = await page.locator("#scroll").evaluate((node) => {
     node.scrollTop -= 2;
+    node.dispatchEvent(new Event("scroll"));
     return node.scrollTop;
   });
   await expect(page.locator("#jump-to-bottom")).toBeVisible();

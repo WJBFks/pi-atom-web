@@ -3,7 +3,11 @@ import { useDialogsStore } from "../../stores/dialogs.js";
 import { useSessionStore } from "../../stores/session.js";
 import { postAction } from "../../api/actions.js";
 import CustomTerminal from "./CustomTerminal.js";
-import AskUserForm from "./AskUserForm.js";
+import {
+  cleanupPackageRequestState,
+  clearPackageRequestState,
+  packageRequestComponent,
+} from "../../packages/registry.js";
 
 const GeneralRequest = defineComponent({
   name: "GeneralRequest",
@@ -153,9 +157,9 @@ export default defineComponent({
         )
           return;
         completed.add(id);
-        try {
-          sessionStorage.removeItem(`ask-user:${id}`);
-        } catch {}
+        clearPackageRequestState(
+          dialogs.requests.find(request => request.id === id),
+        );
       } catch (error) {
         if (
           !disposed &&
@@ -180,16 +184,7 @@ export default defineComponent({
             pending.delete(id);
           }
         for (const id of completed) if (!ids.has(id)) completed.delete(id);
-        const askIds = new Set(
-          dialogs.requests
-            .filter((request) => request.kind === "ask_user_question")
-            .map((request) => request.id),
-        );
-        try {
-          for (const key of Object.keys(sessionStorage))
-            if (key.startsWith("ask-user:") && !askIds.has(key.slice(9)))
-              sessionStorage.removeItem(key);
-        } catch {}
+        cleanupPackageRequestState(dialogs.requests);
       },
       { immediate: true },
     );
@@ -204,14 +199,26 @@ export default defineComponent({
         { id: "plugin-requests", "aria-label": "扩展请求" },
         dialogs.requests
           .filter((request) => !completed.has(request.id))
-          .map((request) =>
-            request.kind === "ask_user_question"
-              ? h(AskUserForm, {
+          .map((request) => {
+            const PackageRequest = request.packageId
+              ? packageRequestComponent(request.packageId)
+              : null;
+            return PackageRequest
+              ? h(PackageRequest, {
                   key: `${session.sessionId}:${request.id}`,
                   request,
                   pending: pending.has(request.id),
                   onSubmit: (detail) =>
-                    respond(detail.id, { draft: detail.draft }, detail.cancel),
+                    respond(
+                      detail.id,
+                      {
+                        draft: detail.draft,
+                        ...(detail.globalNote
+                          ? { globalNote: detail.globalNote }
+                          : {}),
+                      },
+                      detail.cancel,
+                    ),
                 })
               : h(GeneralRequest, {
                   key: `${session.sessionId}:${request.id}`,
@@ -220,8 +227,8 @@ export default defineComponent({
                   pending: pending.has(request.id),
                   respond,
                   onError: props.onError,
-                }),
-          ),
+                });
+          }),
       );
   },
 });

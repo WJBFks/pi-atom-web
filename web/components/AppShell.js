@@ -69,7 +69,8 @@ export default defineComponent({
       window.addEventListener("pagehide", stop);
       if (!token) {
         session.connection = "failed";
-        session.error = "请在 pi TUI 中执行 /web，使用完整地址打开页面。";
+        session.error =
+          "地址缺少连接凭证：请从 pi TUI 里执行 /web 或 /web-wlan，并复制含 # 之后凭证的完整地址打开。";
         return;
       }
       stream = createEventStream({

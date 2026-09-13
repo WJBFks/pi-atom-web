@@ -3,7 +3,7 @@ import { ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import { createAskUserAdapter } from "./ask-user.ts";
+import { createPackageCompatibilityRegistry } from "./packages/registry.ts";
 import { bridgeDialogs } from "./dialogs.ts";
 import { startServer } from "./server.ts";
 import { normalizeRunningTool } from "./tool-events.ts";
@@ -80,8 +80,7 @@ export default function atomWeb(pi) {
   const completedThinkingTimings = new Map();
   const disclosures = new Map();
   let stateStore;
-  const askUser = createAskUserAdapter();
-  pi.events.on("rpiv:ask-user:prompt", (payload) => askUser.prompt(payload));
+  const packageCompatibilities = createPackageCompatibilityRegistry(pi);
   const displayRecords = [];
   function persistState() {
     stateStore?.replace({
@@ -151,7 +150,7 @@ export default function atomWeb(pi) {
       ui,
       () => context.sessionManager.getSessionId(),
       () => publish(context, { requests: dialogs?.list() || [] }),
-      { takeAskUser: (factory) => askUser.take(factory) },
+      { takeCustom: (factory) => packageCompatibilities.takeCustom(factory) },
     );
   }
   // Connection URLs contain credentials and must never enter the mirrored transcript.
@@ -846,7 +845,7 @@ export default function atomWeb(pi) {
   });
   pi.on("tool_execution_start", (event, ctx) => {
     context = ctx;
-    askUser.start(event);
+    packageCompatibilities.start(event);
     runningTools.set(
       event.toolCallId,
       normalizeRunningTool(event, { startedAt: Date.now() }),
@@ -863,7 +862,7 @@ export default function atomWeb(pi) {
   });
   pi.on("tool_execution_end", (event, ctx) => {
     context = ctx;
-    askUser.end(event.toolCallId);
+    packageCompatibilities.end(event.toolCallId);
     const running = runningTools.get(event.toolCallId);
     const endedAt = Date.now();
     if (running?.startedAt) {
@@ -897,7 +896,7 @@ export default function atomWeb(pi) {
     pendingUserRecords.length = 0;
     responseWaitOwnerId = null;
     responseWaitStartedAt = null;
-    askUser.clear();
+    packageCompatibilities.clear();
     clearTimeout(publishTimer);
     publishTimer = undefined;
     pendingPatch = undefined;
@@ -921,6 +920,25 @@ export default function atomWeb(pi) {
       }
     },
   });
+  // 关闭服务（两个命令共用）。
+  const stopWebServer = async (ctx) => {
+    if (starting) await starting;
+    await server?.close();
+    server = undefined;
+    detachNotifications();
+    notifyLocal(ctx, "pi-atom-web 已关闭", "info");
+  };
+  // 启动服务并记录实例；并发调用复用同一次启动过程。
+  const startWebServer = (connection) => {
+    starting ??= startServer({ snapshot, action, connection })
+      .then((value) => {
+        server = value;
+      })
+      .finally(() => {
+        starting = undefined;
+      });
+    return starting;
+  };
   pi.registerCommand("web", {
     description: "打开当前 TUI 会话的 Web UI（/web stop 关闭服务）",
     handler: async (args, ctx) => {
@@ -930,11 +948,7 @@ export default function atomWeb(pi) {
         return;
       }
       if (args.trim() === "stop") {
-        if (starting) await starting;
-        await server?.close();
-        server = undefined;
-        detachNotifications();
-        notifyLocal(ctx, "pi-atom-web 已关闭", "info");
+        await stopWebServer(ctx);
         return;
       }
       if (args.trim()) {
@@ -942,18 +956,61 @@ export default function atomWeb(pi) {
         return;
       }
       try {
-        if (!server) {
-          starting ??= startServer({ snapshot, action })
-            .then((value) => {
-              server = value;
-            })
-            .finally(() => {
-              starting = undefined;
-            });
-          await starting;
-        }
+        if (!server) await startWebServer();
         attachNotifications();
         notifyLocal(ctx, `pi-atom-web · 当前会话\n${server.url}`, "info");
+        if (!(await openBrowser(server.url)))
+          notifyLocal(ctx, "未能自动打开浏览器，请打开上方地址", "warning");
+      } catch (error) {
+        notifyLocal(ctx, `Web UI 启动失败：${error.message}`, "error");
+      }
+    },
+  });
+  pi.registerCommand("web-wlan", {
+    description:
+      "监听 0.0.0.0 打开 Web UI，局域网内设备可访问（凭证仍是唯一凭据）",
+    handler: async (args, ctx) => {
+      context = ctx;
+      if (ctx.mode !== "tui") {
+        notifyLocal(ctx, "/web-wlan 仅用于交互式 TUI", "warning");
+        return;
+      }
+      if (args.trim() === "stop") {
+        await stopWebServer(ctx);
+        return;
+      }
+      if (args.trim()) {
+        notifyLocal(ctx, "用法：/web-wlan 或 /web-wlan stop", "warning");
+        return;
+      }
+      try {
+        await starting;
+        if (server) {
+          // 已在本机模式：就地重绑，复用端口与凭证，已打开的页面不会失效
+          const current = server.connection;
+          await server.close();
+          server = undefined;
+          await startWebServer({ ...current, host: "0.0.0.0" });
+        } else await startWebServer({ host: "0.0.0.0" });
+        attachNotifications();
+        // 每张网卡都给出带凭证的完整地址，避免手工拼地址时丢掉 # 片段。
+        const addressUrl = (address) => {
+          const url = new URL(server.url);
+          url.hostname = address;
+          return url.toString();
+        };
+        const lines = ["pi-atom-web · 当前会话（局域网）", server.url];
+        const others = (server.addresses || []).slice(1);
+        if (others.length)
+          lines.push(
+            `其他网卡：\n${others
+              .map((item) => `${addressUrl(item.address)}（${item.name}）`)
+              .join("\n")}`,
+          );
+        lines.push("该模式不校验 Host/Origin，请仅在可信网络使用，勿泄露上方地址。");
+        if (!(server.addresses || []).length)
+          lines.push("未找到局域网网卡地址，仍监听 0.0.0.0（只能从本机访问）。");
+        notifyLocal(ctx, lines.join("\n"), "warning");
         if (!(await openBrowser(server.url)))
           notifyLocal(ctx, "未能自动打开浏览器，请打开上方地址", "warning");
       } catch (error) {

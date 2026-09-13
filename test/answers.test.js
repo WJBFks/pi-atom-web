@@ -5,7 +5,7 @@ import {
   normalizeAnswers,
   answerText,
   serializeAnswers,
-} from "../web/components/dialogs/answers.js";
+} from "../web/packages/@juicesharp/rpiv-ask-user-question/answers.js";
 const questions = [
   {
     header: "多选",

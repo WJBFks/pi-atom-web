@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
+import { networkInterfaces } from "node:os";
 import {
   validateAction,
   validateServerEvent,
@@ -82,7 +83,7 @@ const assets = new Map([
   ["/shared/protocol.js", ["../shared/protocol.js", "text/javascript"]],
 ]);
 
-async function javaScriptAssets(
+async function browserAssets(
   root,
   publicPrefix,
   directory = root,
@@ -93,17 +94,20 @@ async function javaScriptAssets(
   for (const file of files) {
     const relative = `${relativePrefix}${file.name}`;
     if (file.isDirectory()) {
-      for (const [path, target] of await javaScriptAssets(
+      for (const [path, target] of await browserAssets(
         root,
         publicPrefix,
         new URL(`${file.name}/`, directory),
         `${relative}/`,
       ))
         assets.set(path, target);
-    } else if (file.isFile() && file.name.endsWith(".js")) {
+    } else if (
+      file.isFile() &&
+      (file.name.endsWith(".js") || file.name.endsWith(".css"))
+    ) {
       assets.set(`/${publicPrefix}${relative}`, [
         new URL(relative, root),
-        "text/javascript",
+        file.name.endsWith(".css") ? "text/css" : "text/javascript",
       ]);
     }
   }
@@ -112,7 +116,7 @@ async function javaScriptAssets(
 
 async function configuredAssets() {
   const configured = new Map(assets);
-  for (const [path, target] of await javaScriptAssets(
+  for (const [path, target] of await browserAssets(
     new URL("../web/", import.meta.url),
     "",
   ))
@@ -129,7 +133,7 @@ async function configuredAssets() {
     "../node_modules/vue-router/dist/vue-router.esm-browser.prod.js",
     "text/javascript",
   ]);
-  for (const [path, target] of await javaScriptAssets(
+  for (const [path, target] of await browserAssets(
     new URL("../node_modules/@vue/devtools-api/lib/esm/", import.meta.url),
     "vendor/devtools-api/",
   ))
@@ -151,9 +155,43 @@ async function importMapHash() {
   return `'sha256-${createHash("sha256").update(maps[0][1]).digest("base64")}'`;
 }
 
-/** One loopback server belongs to one live pi process. No session files are written. */
+// 无法从别的设备访问的地址：链路本地（169.254/16）与代理/TUN 常用的 fake-IP 段（198.18/15）。
+const UNUSABLE_LAN_ADDRESS = [/^169\.254\./, /^198\.18\./, /^198\.19\./];
+// 虚拟/隧道网卡的名字特征：它们通常不是对方设备能访问的那张网卡（名字仍会展示，只是排在后面）。
+const VIRTUAL_INTERFACE_NAME =
+  /virtual|vmware|hyper-v|vethernet|wsl|docker|tailscale|zerotier|clash|meta|tun|tap|bluetooth/i;
+
+/** 从 networkInterfaces() 结果里挑出可用于局域网访问的 IPv4 地址；纯函数，便于测试。 */
+export function pickLanAddresses(interfaces) {
+  const found = [];
+  for (const [name, entries] of Object.entries(interfaces || {})) {
+    for (const entry of entries || []) {
+      if (entry.family !== "IPv4" || entry.internal) continue;
+      if (UNUSABLE_LAN_ADDRESS.some((pattern) => pattern.test(entry.address)))
+        continue;
+      found.push({
+        name,
+        address: entry.address,
+        virtual: VIRTUAL_INTERFACE_NAME.test(name),
+      });
+    }
+  }
+  // 实体网卡优先作为主地址；同组内保留系统顺序（sort 是稳定的）。
+  found.sort((a, b) => Number(a.virtual) - Number(b.virtual));
+  return found.map(({ name, address }) => ({ name, address }));
+}
+
+/** 本机可被局域网访问的 IPv4 地址（实体网卡优先，排除内部/不可用地址）。 */
+export function lanAddresses() {
+  return pickLanAddresses(networkInterfaces());
+}
+
+/** One server belongs to one live pi process. No session files are written. */
 export async function startServer({ snapshot, action, connection }) {
   const token = connection?.token || randomBytes(32).toString("hex");
+  // 局域网模式（/web-wlan）：监听 0.0.0.0，并按约定不校验 Host/Origin ——
+  // 此时 URL 里的随机凭证是唯一凭据。
+  const lan = connection?.host === "0.0.0.0";
   const clients = new Map();
   const staticAssets = await configuredAssets();
   const importMapCspHash = await importMapHash();
@@ -174,8 +212,9 @@ export async function startServer({ snapshot, action, connection }) {
     );
     try {
       if (
-        req.headers.host !== new URL(origin).host ||
-        (req.headers.origin && req.headers.origin !== origin)
+        !lan &&
+        (req.headers.host !== new URL(origin).host ||
+          (req.headers.origin && req.headers.origin !== origin))
       ) {
         return reply(403, { error: "请求来源不匹配" });
       }
@@ -235,9 +274,15 @@ export async function startServer({ snapshot, action, connection }) {
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(connection?.port || 0, "127.0.0.1", resolve);
+    server.listen(connection?.port || 0, lan ? "0.0.0.0" : "127.0.0.1", resolve);
   });
-  origin = `http://127.0.0.1:${server.address().port}`;
+  const port = server.address().port;
+  origin = `http://127.0.0.1:${port}`;
+  const addresses = lan ? lanAddresses() : [];
+  // 局域网模式下对外展示第一个非内部网卡地址；取不到时回退到回环地址。
+  const publicOrigin = addresses.length
+    ? `http://${addresses[0].address}:${port}`
+    : origin;
   function encode(event) {
     try {
       const wireEvent = JSON.parse(JSON.stringify(event));
@@ -296,8 +341,9 @@ export async function startServer({ snapshot, action, connection }) {
   }, 15000);
   heartbeat.unref();
   return {
-    url: `${origin}/#${token}`,
-    connection: { port: server.address().port, token },
+    url: `${publicOrigin}/#${token}`,
+    addresses,
+    connection: { port, token, ...(lan ? { host: "0.0.0.0" } : {}) },
     publish(patch = {}, sessionId) {
       if (!clients.size) return;
       const hasPatch = Object.keys(patch).length > 0;
