@@ -1,6 +1,6 @@
 {
   "name": "pi-atom-web",
-  "version": "0.2.49",
+  "version": "0.3.0",
   "description": "当前 pi TUI 会话的 Web 界面",
   "type": "module",
   "pi": {
@@ -9,14 +9,23 @@
     ]
   },
   "scripts": {
-    "test": "node --test",
-    "check": "node --check extensions/index.ts && node --check extensions/server.ts && node --check extensions/dialogs.ts && node --check extensions/ask-user.ts && node --check web/app.js && node --check web/ask-user.js"
+    "test": "node scripts/test.mjs",
+    "check": "node scripts/check.mjs",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans-mono": "5.2.8",
     "@highlightjs/cdn-assets": "11.12.0",
+    "@vue/devtools-api": "6.6.4",
     "@xterm/xterm": "^6.0.0",
     "dompurify": "^3.3.0",
-    "marked": "^17.0.0"
+    "marked": "^17.0.0",
+    "pinia": "3.0.4",
+    "vue": "3.5.42",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@playwright/test": "1.63.0"
   }
 }
