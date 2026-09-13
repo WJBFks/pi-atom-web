@@ -1,5 +1,10 @@
 import { test as base, expect } from "@playwright/test";
 import { startServer } from "../../extensions/server.ts";
+import {
+  HISTORY_TURNS,
+  olderHistory,
+  windowedHistory,
+} from "../../extensions/history-window.ts";
 
 const token = "a".repeat(64);
 const fixture = (overrides = {}) => ({
@@ -558,39 +563,40 @@ test("skill reads render as a purple skill card with the skill name", async ({
   expect(errors).toEqual([]);
 });
 
-test("turn groups expand while the turn runs and collapse once it ends", async ({
+test("turn groups stay open after the turn ends and fold on the next user input", async ({
   page,
   web,
 }) => {
+  const turnMessages = [
+    ...fixture().messages,
+    { id: "turn-u1", role: "user", content: "第一轮问题" },
+    {
+      id: "turn-a1",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先读一下" },
+        { type: "text", text: "中间说明" },
+        { type: "toolCall", id: "call-turn", name: "bash", arguments: { command: "ls" } },
+      ],
+    },
+    {
+      id: "turn-r1",
+      role: "toolResult",
+      toolCallId: "call-turn",
+      content: [{ type: "text", text: "out" }],
+      isError: false,
+    },
+    {
+      id: "turn-a2",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "收尾" },
+        { type: "text", text: "最终答案" },
+      ],
+    },
+  ];
   web.setSnapshot({
-    messages: [
-      ...fixture().messages,
-      { id: "turn-u1", role: "user", content: "第一轮问题" },
-      {
-        id: "turn-a1",
-        role: "assistant",
-        content: [
-          { type: "thinking", thinking: "先读一下" },
-          { type: "text", text: "中间说明" },
-          { type: "toolCall", id: "call-turn", name: "bash", arguments: { command: "ls" } },
-        ],
-      },
-      {
-        id: "turn-r1",
-        role: "toolResult",
-        toolCallId: "call-turn",
-        content: [{ type: "text", text: "out" }],
-        isError: false,
-      },
-      {
-        id: "turn-a2",
-        role: "assistant",
-        content: [
-          { type: "thinking", thinking: "收尾" },
-          { type: "text", text: "最终答案" },
-        ],
-      },
-    ],
+    messages: turnMessages,
     tools: [],
     busy: true,
     liveMessage: { id: "live-turn", role: "assistant", content: "正在生成" },
@@ -622,17 +628,110 @@ test("turn groups expand while the turn runs and collapse once it ends", async (
   await expect(page.locator("#message-history > .message").last()).toContainText(
     "最终答案",
   );
-  // 流式消息结束但会话仍在工作（工具还在跑 / 模型还要继续）时不折叠
+  // 流式消息结束、会话也不再工作时，仍然保持展开（折叠时机已改为下一个用户输入）
   web.publish({ liveMessage: null, tools: [], busy: true });
   await expect(group).toHaveAttribute("open", "");
-  // 整轮输出完全停止后才自动折叠
   web.publish({ busy: false });
+  await expect(group).toHaveAttribute("open", "");
+
+  // 下一个用户输入开始 → 自动折叠
+  web.publish({
+    messages: [
+      ...turnMessages,
+      { id: "turn-u2", role: "user", content: "第二轮问题" },
+    ],
+  });
   await expect(group).not.toHaveAttribute("open", "");
-  // 仍然可以手动展开
+
+  // 用户手动展开过 → 再下一个用户输入也不再自动折叠
   await page.locator(".turn-group > summary").click();
+  await expect(group).toHaveAttribute("open", "");
+  web.publish({
+    messages: [
+      ...turnMessages,
+      { id: "turn-u2", role: "user", content: "第二轮问题" },
+      { id: "turn-u3", role: "user", content: "第三轮问题" },
+    ],
+  });
   await expect(group).toHaveAttribute("open", "");
   await expect(group.locator(".thinking-block").first()).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test("turning off auto collapse keeps middle steps open past the next user input", async ({
+  page,
+  web,
+}) => {
+  const messages = [
+    ...fixture().messages,
+    { id: "auto-u1", role: "user", content: "问题" },
+    {
+      id: "auto-a1",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "思考" },
+        { type: "toolCall", id: "call-auto", name: "bash", arguments: { command: "ls" } },
+      ],
+    },
+    { id: "auto-r1", role: "toolResult", toolCallId: "call-auto", content: [{ type: "text", text: "out" }] },
+    { id: "auto-a2", role: "assistant", content: [{ type: "text", text: "答案" }] },
+    { id: "auto-u2", role: "user", content: "下一个问题" },
+  ];
+  web.setSnapshot({ messages });
+  await open(page, web);
+  const group = page.locator(".turn-group");
+  await expect(group).toHaveCount(1);
+  // 默认：下一个用户输入开始后就折叠
+  await expect(group).not.toHaveAttribute("open", "");
+
+  // 关闭自动折叠后，即使已有下一个用户输入也保持展开
+  await page.locator('[data-view="settings"]').click();
+  await page.locator('[data-section="behaviour"]').click();
+  await page.locator('[data-toggle="自动折叠中间过程"]').uncheck();
+  await page.locator('[data-view="chat"]').click();
+  await expect(group).toHaveAttribute("open", "");
+});
+
+test("a new thinking block folds the previous one, and the reply end folds the rest", async ({
+  page,
+  web,
+}) => {
+  const content = [
+    { type: "thinking", thinking: "第一段思考" },
+    { type: "toolCall", id: "call-think", name: "bash", arguments: { command: "ls" } },
+    { type: "thinking", thinking: "第二段思考" },
+  ];
+  web.setSnapshot({
+    liveMessage: { id: "multi-thinking", role: "assistant", content: [content[0]] },
+  });
+  await open(page, web);
+  const blocks = page.locator(".thinking-block");
+  await expect(blocks).toHaveCount(1);
+  await expect(blocks.nth(0)).toHaveAttribute("open", "");
+
+  // 第二个思考块开始 → 前一个立刻折叠，最后一个保持展开
+  web.publish({
+    liveMessage: { id: "multi-thinking", role: "assistant", content },
+  });
+  await expect(blocks).toHaveCount(2);
+  await expect(blocks.nth(0)).not.toHaveAttribute("open", "");
+  await expect(blocks.nth(1)).toHaveAttribute("open", "");
+
+  // 全部回话结束（消息离开 live 区）→ 最后一个也折叠
+  web.publish({
+    liveMessage: null,
+    messages: [
+      ...fixture().messages,
+      {
+        id: "finished-multi",
+        liveId: "multi-thinking",
+        role: "assistant",
+        content: [...content, { type: "text", text: "答案" }],
+      },
+    ],
+  });
+  await expect(blocks.nth(0)).not.toHaveAttribute("open", "");
+  await expect(blocks.nth(1)).not.toHaveAttribute("open", "");
 });
 
 test("untouched Thinking collapses on completion and code blocks keep copyable source separate", async ({
@@ -1096,4 +1195,715 @@ test("content column resizes from the edge handle, follows the pointer and is re
   // 窄视口不提供拖动手柄。
   await page.setViewportSize({ width: 390, height: 700 });
   await expect(page.locator(".column-resizer-zone").first()).toBeHidden();
+});
+
+test("top tabs switch between conversation, context and settings", async ({
+  page,
+  web,
+}) => {
+  await open(page, web);
+  const tab = (id) => page.locator(`[data-view="${id}"]`);
+  await expect(page.locator('.view-tabs [role="tab"]')).toHaveCount(4);
+  await expect(tab("chat")).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#view-panel-feed")).toBeVisible();
+  await expect(page.locator("#view-panel-context")).toBeHidden();
+  await expect(page.locator("#view-panel-settings")).toBeHidden();
+
+  // 执行轨迹将改为独立页面：tab 保持可见但不可选中。
+  await expect(tab("trace")).toBeDisabled();
+  await tab("trace").click({ force: true });
+  await expect(tab("chat")).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#view-panel-feed")).toBeVisible();
+
+  await tab("settings").click();
+  await expect(tab("settings")).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#view-panel-settings")).toBeVisible();
+  await expect(page.locator("#view-panel-feed")).toBeHidden();
+  // 设置页是左侧分类导航 + 右侧内容
+  await expect(page.locator(".settings-nav [role='tab']")).toHaveCount(4);
+  for (const label of ["外观", "会话信息", "连接与实例", "行为"])
+    await expect(page.locator(".settings-nav")).toContainText(label);
+  await expect(page.locator("#settings-panel")).toContainText("主题");
+  await page.locator('[data-section="session"]').click();
+  await expect(page.locator("#settings-panel")).toContainText("session-browser");
+  await page.locator('[data-section="connection"]').click();
+  await expect(page.locator("#settings-panel")).toContainText("连接凭证");
+  await page.locator('[data-section="behaviour"]').click();
+  await expect(page.locator("#settings-panel")).toContainText("自动折叠中间过程");
+
+  await tab("context").click();
+  await expect(page.locator("#view-panel-context")).toContainText("上下文构成");
+  await expect(page.locator("#view-panel-context")).toContainText("Token 用量");
+
+  // 键盘：焦点跟着选中项移动（跳过不可选中的轨迹）。
+  await tab("chat").click();
+  await tab("chat").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(tab("context")).toHaveAttribute("aria-selected", "true");
+  await expect(tab("context")).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(tab("settings")).toHaveAttribute("aria-selected", "true");
+  await tab("chat").click();
+  await expect(page.locator("#message-history")).toContainText("历史消息");
+});
+
+test("switching tabs keeps the transcript laid out and its scroll position", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    messages: [
+      ...fixture().messages,
+      ...Array.from({ length: 40 }).flatMap((_, i) => [
+        { id: `bench-u${i}`, role: "user", content: `第 ${i} 轮：看看这段` },
+        {
+          id: `bench-a${i}`,
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: `第 ${i} 轮结论：\`parse()\` 的第二个参数有问题。`,
+            },
+          ],
+        },
+      ]),
+    ],
+  });
+  await open(page, web);
+  const scroll = page.locator("#scroll");
+  await scroll.evaluate((node) =>
+    node.scrollTo({ top: Math.round(node.scrollHeight * 0.4), behavior: "instant" }),
+  );
+  const before = await scroll.evaluate((node) => node.scrollTop);
+  expect(before).toBeGreaterThan(0);
+
+  await page.locator('[data-view="settings"]').click();
+  // 消息区只切 visibility：保持布局，否则切回来要重排整段 transcript（实测 100–130ms）。
+  expect(
+    await page
+      .locator("#view-panel-feed")
+      .evaluate((node) => getComputedStyle(node).display),
+  ).not.toBe("none");
+  await page.locator('[data-view="chat"]').click();
+  await expect(page.locator("#view-panel-feed")).toBeVisible();
+  expect(await scroll.evaluate((node) => node.scrollTop)).toBe(before);
+  await expect(page.locator("#message-history")).toContainText("历史消息");
+
+  // 切页不丢草稿，dock 高度也要恢复；隐藏期间到达的历史照常进入消息区。
+  await page.fill("#prompt", "未发出的草稿");
+  await page.locator('[data-view="settings"]').click();
+  await expect(page.locator(".compose-wrap")).toBeHidden();
+  web.publish({
+    messages: [
+      ...fixture().messages,
+      { id: "late-1", role: "user", content: "隐藏期间的问题" },
+      {
+        id: "late-2",
+        role: "assistant",
+        content: [{ type: "text", text: "隐藏期间的回答" }],
+      },
+    ],
+  });
+  await page.locator('[data-view="chat"]').click();
+  await expect(page.locator("#prompt")).toHaveValue("未发出的草稿");
+  await expect(page.locator("#message-history")).toContainText("隐藏期间的回答");
+  await expect
+    .poll(async () =>
+      Number.parseFloat(
+        await page.evaluate(() =>
+          getComputedStyle(document.documentElement)
+            .getPropertyValue("--compose-height")
+            .trim(),
+        ),
+      ),
+    )
+    .toBeGreaterThan(0);
+});
+
+test("the settings tab controls theme, content width and behaviour, and remembers them", async ({
+  page,
+  web,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await open(page, web);
+  await page.locator('[data-view="settings"]').click();
+  const panel = page.locator("#view-panel-settings");
+
+  // 主题：立即生效 + 写入 atom-theme
+  await expect(page.locator("html")).not.toHaveClass(/dark/);
+  await panel.locator('[data-choice="dark"]').click();
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await expect(panel.locator('[data-choice="dark"]')).toHaveClass(/active/);
+  expect(await page.evaluate(() => localStorage.getItem("atom-theme"))).toBe(
+    "dark",
+  );
+
+  // 内容列宽度：数值输入 + 滑块 + 右侧还原图标，与拖动列宽共用 atom-content-width
+  const contentWidth = () =>
+    page.evaluate(() => localStorage.getItem("atom-content-width"));
+  const cssVar = (name) =>
+    page.evaluate(
+      (which) =>
+        getComputedStyle(document.documentElement).getPropertyValue(which).trim(),
+      name,
+    );
+  const resetWidth = page.locator('[data-reset^="还原默认宽度"]');
+  await page.fill("#setting-content-width", "640");
+  await page.locator("#setting-content-width").blur();
+  await expect.poll(contentWidth).toBe("640");
+  expect(await cssVar("--content-width")).toBe("640px");
+
+  // 滑块：拖动（键盘步进）同样实时生效
+  await page.locator("#setting-content-width-range").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(contentWidth).toBe("650");
+  expect(await cssVar("--content-width")).toBe("650px");
+
+  // 还原图标：回到默认值后自动禁用
+  await expect(resetWidth).toBeEnabled();
+  await resetWidth.click();
+  await expect.poll(contentWidth).toBe("860");
+  expect(await cssVar("--content-width")).toBe("860px");
+  await expect(resetWidth).toBeDisabled();
+
+  const stored = () =>
+    page.evaluate(() => JSON.parse(localStorage.getItem("atom-settings") || "{}"));
+
+  // 安全区：写成 --safe-area-top/-bottom，由 .layout 的 padding 消费
+  const safeArea = (side) => cssVar(side);
+  await page.fill("#setting-safe-area-top", "24");
+  await page.locator("#setting-safe-area-top").blur();
+  await page.locator("#setting-safe-area-bottom-range").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(() => safeArea("--safe-area-bottom")).toBe("1px");
+  await page.fill("#setting-safe-area-bottom", "12");
+  await page.locator("#setting-safe-area-bottom").blur();
+  await expect.poll(() => safeArea("--safe-area-top")).toBe("24px");
+  expect(await safeArea("--safe-area-bottom")).toBe("12px");
+  expect(
+    await page
+      .locator(".layout")
+      .evaluate((node) => getComputedStyle(node).paddingTop),
+  ).toBe("24px");
+  expect(
+    await page
+      .locator(".layout")
+      .evaluate((node) => getComputedStyle(node).paddingBottom),
+  ).toBe("12px");
+  await expect.poll(async () => (await stored()).safeAreaBottom).toBe(12);
+
+  // 顶部安全区的还原图标
+  const resetTop = page.locator('[data-reset="还原顶部安全区"]');
+  await expect(resetTop).toBeEnabled();
+  await resetTop.click();
+  await expect.poll(() => safeArea("--safe-area-top")).toBe("0px");
+  await expect(resetTop).toBeDisabled();
+
+  // 折叠与跟随开关写入 atom-settings（在左侧「行为」分类里）
+  await panel.locator('[data-section="behaviour"]').click();
+  await page.locator('[data-toggle="自动折叠中间过程"]').uncheck();
+  await page.locator('[data-toggle="自动跟随最新消息"]').uncheck();
+  await expect.poll(async () => (await stored()).autoCollapse).toBe(false);
+  expect((await stored()).autoFollow).toBe(false);
+
+  // 默认视图：重新载入后落在上下文页，主题与开关保持
+  await panel.locator('[data-choice="context"]').click();
+  await page.reload();
+  await expect(page.locator("#message-history")).toContainText("历史消息");
+  await expect(page.locator('[data-view="context"]')).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  // 安全区随刷新保持
+  expect(await cssVar("--safe-area-bottom")).toBe("12px");
+  expect(
+    await page
+      .locator(".layout")
+      .evaluate((node) => getComputedStyle(node).paddingBottom),
+  ).toBe("12px");
+});
+
+test("context and settings pages hide the composer dock", async ({
+  page,
+  web,
+}) => {
+  await open(page, web);
+  const dock = page.locator(".compose-wrap");
+  const composeHeight = () =>
+    page.evaluate(() =>
+      getComputedStyle(document.documentElement)
+        .getPropertyValue("--compose-height")
+        .trim(),
+    );
+  await expect(dock).toBeVisible();
+  expect(Number.parseFloat(await composeHeight())).toBeGreaterThan(0);
+
+  await page.locator('[data-view="settings"]').click();
+  await expect(dock).toBeHidden();
+  // dock 不占位：ResizeObserver 会把高度写成 0，页面底部留白随之收缩。
+  await expect.poll(composeHeight).toBe("0px");
+  expect(
+    await page
+      .locator(".settings-page")
+      .evaluate((node) => getComputedStyle(node).paddingBottom),
+  ).toBe("20px");
+
+  await page.locator('[data-view="context"]').click();
+  await expect(dock).toBeHidden();
+
+  await page.locator('[data-view="chat"]').click();
+  await expect(dock).toBeVisible();
+  await expect
+    .poll(async () => Number.parseFloat(await composeHeight()))
+    .toBeGreaterThan(0);
+});
+
+test.describe("touch device", () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test("the bottom safe area yields while an input is focused", async ({
+    page,
+    web,
+  }) => {
+    const bottom = () =>
+      page.evaluate(() =>
+        getComputedStyle(document.documentElement)
+          .getPropertyValue("--safe-area-bottom")
+          .trim(),
+      );
+    await open(page, web);
+    await page.locator('[data-view="settings"]').click();
+    await page.fill("#setting-safe-area-bottom", "24");
+    await page.locator("#setting-safe-area-bottom").blur();
+    await expect.poll(bottom).toBe("24px");
+    await page.locator('[data-view="chat"]').click();
+    await expect(page.locator("#prompt")).toBeVisible();
+
+    // 手机上点到输入框（软键盘弹出）→ 底部安全区让位
+    await page.locator("#prompt").click();
+    await expect.poll(bottom).toBe("0px");
+    // 配置值不变
+    expect(
+      JSON.parse(
+        await page.evaluate(() => localStorage.getItem("atom-settings")),
+      ).safeAreaBottom,
+    ).toBe(24);
+
+    // 失焦后恢复
+    await page.locator("#prompt").blur();
+    await expect.poll(bottom).toBe("24px");
+  });
+});
+
+test("long sessions paint the newest turns first and backfill the rest in the background", async ({
+  page,
+  web,
+}) => {
+  const turns = 25;
+  const turnMessages = Array.from({ length: turns }).flatMap((_, index) => [
+    { id: `lazy-u${index}`, role: "user", content: `第 ${index} 轮问题` },
+    {
+      id: `lazy-a${index}`,
+      role: "assistant",
+      content: [
+        { type: "thinking", text: `第 ${index} 轮思考` },
+        {
+          type: "toolCall",
+          id: `lazy-call-${index}`,
+          name: "bash",
+          arguments: { command: `echo ${index}` },
+        },
+      ],
+    },
+    {
+      id: `lazy-r${index}`,
+      role: "toolResult",
+      toolCallId: `lazy-call-${index}`,
+      content: [{ type: "text", text: `第 ${index} 轮输出` }],
+    },
+    {
+      id: `lazy-f${index}`,
+      role: "assistant",
+      content: [{ type: "text", text: `第 ${index} 轮结论` }],
+    },
+  ]);
+  // 模拟后端分页：首屏只发最近 10 轮，更早的由客户端按游标向前补
+  const windowed = windowedHistory(turnMessages, HISTORY_TURNS);
+  web.setSnapshot({
+    messages: windowed.messages,
+    historyComplete: false,
+    liveMessage: null,
+    tools: [],
+  });
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let released = false;
+  web.setActionHandler(async (action, server) => {
+    if (action.type !== "more_history") return {};
+    if (!released) await gate;
+    const index = turnMessages.findIndex(
+      (message) => String(message.id) === String(action.cursor),
+    );
+    if (index <= 0) {
+      server.publish({ historyComplete: true });
+      return { queued: true, count: 0 };
+    }
+    const { messages, start } = olderHistory(turnMessages, index, HISTORY_TURNS);
+    server.publish({ prependMessages: messages, historyComplete: start === 0 });
+    return { queued: true, count: messages.length };
+  });
+
+  const failures = [];
+  page.on("pageerror", (error) => failures.push(error.message));
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  await expect(page.locator("#message-history")).toContainText(`第 ${turns - 1} 轮结论`);
+
+  // 首屏只有最近 10 轮，且已加载的中间过程全部折叠
+  expect(await page.locator(".turn-group").count()).toBe(HISTORY_TURNS);
+  expect(await page.locator(".turn-group[open]").count()).toBe(0);
+  await expect(page.locator("#message-history")).not.toContainText("第 0 轮结论");
+  // 游标就是当前最老一条
+  await expect
+    .poll(() => web.actions.filter((action) => action.type === "more_history").length)
+    .toBeGreaterThan(0);
+  expect(
+    web.actions.find((action) => action.type === "more_history").cursor,
+  ).toBe("lazy-u15");
+
+  // 放行后台补页：更早的轮次逐页插入，已渲染内容不受影响
+  released = true;
+  release();
+  await expect(page.locator("#message-history")).toContainText("第 0 轮结论", {
+    timeout: 15_000,
+  });
+  expect(await page.locator(".turn-group").count()).toBe(turns);
+  expect(await page.locator(".turn-group[open]").count()).toBe(0);
+  await expect(page.locator("#message-history")).toContainText("第 24 轮结论");
+  expect(failures).toEqual([]);
+});
+
+test("system tools render dedicated write content and edit diffs", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    messages: [
+      ...fixture().messages,
+      { id: "sys-u1", role: "user", content: "改一下这个文件" },
+      {
+        id: "sys-w1",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-write",
+            name: "write",
+            arguments: {
+              file_path: "src/demo.ts",
+              content: "export const answer = 42;\n",
+            },
+          },
+        ],
+      },
+      {
+        id: "sys-w2",
+        role: "toolResult",
+        toolCallId: "call-write",
+        toolName: "write",
+        content: [{ type: "text", text: "已写入 src/demo.ts" }],
+      },
+      {
+        id: "sys-e1",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-edit",
+            name: "edit",
+            arguments: {
+              file_path: "src/demo.ts",
+              oldText: "export const answer = 42;",
+              newText: "export const answer = 43;",
+            },
+          },
+        ],
+      },
+      {
+        id: "sys-e2",
+        role: "toolResult",
+        toolCallId: "call-edit",
+        toolName: "edit",
+        content: [{ type: "text", text: "已修改 src/demo.ts" }],
+        details: {
+          diff: [
+            " 1 export const answer = 42;",
+            `-2 export const answer = 42; // ${'x'.repeat(320)}`,
+            "+2 export const answer = 43;",
+          ].join("\n"),
+          firstChangedLine: 2,
+        },
+      },
+    ],
+  });
+  const errors = await open(page, web);
+  const card = (name) =>
+    page
+      .locator(".tool-block")
+      .filter({ has: page.locator(`.tool-title strong:text-is("${name}")`) })
+      .first();
+
+  // write：标题带路径，正文是推断出语言的高亮内容，原始入参收进二级折叠
+  const write = card("write");
+  await expect(write.locator(".tool-title")).toContainText("write");
+  await expect(write.locator(".tool-title")).toContainText("src/demo.ts");
+  await expect(write.locator(".code-header").first()).toContainText("typescript");
+  await expect(write.locator(".code-source code").first()).toHaveText(
+    "export const answer = 42;",
+  );
+  await expect(write.locator("details.tool-raw-input")).toHaveCount(1);
+  await expect(write.locator("details.tool-raw-input")).not.toHaveAttribute(
+    "open",
+    "",
+  );
+  await expect(write.locator("details.tool-raw-input")).toContainText(
+    "原始 Input",
+  );
+  await expect(write.locator(".tool-output-frame")).toContainText(
+    "已写入 src/demo.ts",
+  );
+
+  // edit：结果带宿主算好的 diff 时按真实行号渲染
+  const edit = card("edit");
+  await expect(edit.locator(".tool-title")).toContainText("src/demo.ts");
+  await expect(edit.locator(".diff-removed .diff-number")).toHaveText("2");
+  await expect(edit.locator(".diff-added .diff-number")).toHaveText("2");
+  await expect(edit.locator(".diff-removed .diff-text")).toContainText(
+    "export const answer = 42;",
+  );
+  await expect(edit.locator(".diff-added .diff-text")).toHaveText(
+    "export const answer = 43;",
+  );
+  await expect(edit.locator("details.tool-raw-input")).toHaveCount(1);
+
+  // diff 整块横向滚动，行号 gutter 固定（不能每行各自滚动）
+  // 折叠状态下几何量全是 0，先展开中间过程与工具卡。
+  await page.locator(".turn-group > summary").first().click();
+  await edit.locator("> summary").click();
+  const block = edit.locator(".diff-block");
+  const layout = await block.evaluate((node) => ({
+    blockOverflowX: getComputedStyle(node).overflowX,
+    lineOverflowX: getComputedStyle(node.querySelector(".diff-line")).overflowX,
+    gutterPosition: getComputedStyle(node.querySelector(".diff-gutter")).position,
+    scrollable: node.scrollWidth > node.clientWidth,
+  }));
+  expect(layout.blockOverflowX).toBe("auto");
+  expect(layout.lineOverflowX).toBe("visible");
+  expect(layout.gutterPosition).toBe("sticky");
+  expect(layout.scrollable).toBe(true);
+  const sticky = await block.evaluate(async (node) => {
+    const gutter = node.querySelector(".diff-gutter");
+    const before = Math.round(gutter.getBoundingClientRect().left);
+    node.scrollLeft = node.scrollWidth;
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    return {
+      before,
+      after: Math.round(gutter.getBoundingClientRect().left),
+      scrollLeft: Math.round(node.scrollLeft),
+    };
+  });
+  expect(sticky.scrollLeft).toBeGreaterThan(0);
+  expect(sticky.after).toBe(sticky.before);
+  expect(errors).toEqual([]);
+});
+
+test("read and bash results render as code and terminal output", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    messages: [
+      ...fixture().messages,
+      { id: "rb-u1", role: "user", content: "读一下并跑个命令" },
+      {
+        id: "rb-a1",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-read",
+            name: "read",
+            arguments: { file_path: "src/demo.ts", offset: 200, limit: 2 },
+          },
+        ],
+      },
+      {
+        id: "rb-r1",
+        role: "toolResult",
+        toolCallId: "call-read",
+        toolName: "read",
+        content: [
+          {
+            type: "text",
+            text: "export const answer = 43;\nexport const other = 1;\n\n[246 more lines in file. Use offset=202 to continue.]",
+          },
+        ],
+      },
+      {
+        id: "rb-a2",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-bash",
+            name: "bash",
+            arguments: { command: "printf '# not a heading\\n* not a bullet'" },
+          },
+        ],
+      },
+      {
+        id: "rb-r2",
+        role: "toolResult",
+        toolCallId: "call-bash",
+        toolName: "bash",
+        content: [{ type: "text", text: "# not a heading\n* not a bullet" }],
+      },
+    ],
+  });
+  const errors = await open(page, web);
+  const card = (name) =>
+    page
+      .locator(".tool-block")
+      .filter({ has: page.locator(`.tool-title strong:text-is("${name}")`) })
+      .first();
+
+  // read：INPUT 是可读参数 + 原始 Input 折叠；OUTPUT 按路径语言高亮、行号从 offset 开始
+  const read = card("read");
+  await expect(read.locator(".tool-title")).toContainText("src/demo.ts");
+  const readInput = read.locator(".tool-body > .tool-io-section").first();
+  await expect(readInput.locator(".tool-io-label")).toHaveText("Input");
+  await expect(readInput.locator(".tool-params dt")).toHaveText([
+    "路径",
+    "起始行",
+    "行数",
+  ]);
+  await expect(readInput.locator(".tool-params dd").first()).toHaveText(
+    "src/demo.ts",
+  );
+  // 原始 JSON 收进二级折叠（默认收起）
+  await expect(readInput.locator("details.tool-raw-input")).not.toHaveAttribute(
+    "open",
+    "",
+  );
+  await expect(
+    readInput.locator("details.tool-raw-input .code-header"),
+  ).toContainText("json");
+  await expect(read.locator(".tool-output-frame .code-header")).toContainText(
+    "typescript",
+  );
+  await expect(read.locator(".tool-output-frame .code-lines")).toContainText("200");
+  await expect(read.locator(".tool-output-frame .code-lines")).toContainText("201");
+  await expect(read.locator(".tool-output-frame .code-source code")).toContainText(
+    "export const answer = 43;",
+  );
+  // 工具提示语不进代码块，而是代码块外的备注
+  await expect(read.locator(".tool-output-frame .code-source code")).not.toContainText(
+    "more lines in file",
+  );
+  await expect(read.locator(".tool-notices")).toContainText(
+    "[246 more lines in file. Use offset=202 to continue.]",
+  );
+
+  // bash：INPUT 是 bash 代码块（命令），OUTPUT 原样展示终端文本（markdown 不会改写 # / *）
+  const bash = card("bash");
+  const bashInput = bash.locator(".tool-body > .tool-io-section").first();
+  await expect(bashInput.locator(".tool-io-label")).toHaveText("Input");
+  await expect(bashInput.locator(".code-header").first()).toContainText("bash");
+  await expect(bashInput.locator(".code-source code").first()).toHaveText(
+    "printf '# not a heading\\n* not a bullet'",
+  );
+  await expect(bashInput.locator("details.tool-raw-input .code-header")).toContainText(
+    "json",
+  );
+  await expect(bash.locator(".tool-output-frame pre.shell-output")).toHaveText(
+    "# not a heading\n* not a bullet",
+  );
+  await expect(bash.locator(".tool-output-frame h1")).toHaveCount(0);
+  await expect(bash.locator(".tool-output-frame ul")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("edit falls back to argument hunks without line numbers until the result arrives", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    messages: [
+      ...fixture().messages,
+      { id: "fb-u1", role: "user", content: "改一行" },
+      {
+        id: "fb-a1",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-fallback",
+            name: "edit",
+            arguments: {
+              file_path: "src/fallback.ts",
+              oldText: "const before = 1;",
+              newText: "const after = 2;",
+            },
+          },
+        ],
+      },
+      {
+        id: "fb-r1",
+        role: "toolResult",
+        toolCallId: "call-fallback",
+        toolName: "edit",
+        content: [{ type: "text", text: "已修改 src/fallback.ts" }],
+      },
+    ],
+  });
+  await open(page, web);
+  const card = page
+    .locator(".tool-block")
+    .filter({ has: page.locator('.tool-title strong:text-is("edit")') })
+    .first();
+  await expect(card.locator(".diff-removed .diff-text")).toHaveText(
+    "const before = 1;",
+  );
+  await expect(card.locator(".diff-added .diff-text")).toHaveText(
+    "const after = 2;",
+  );
+  // 参数里没有文件行号，行号列留空
+  await expect(card.locator(".diff-removed .diff-number")).toHaveText("");
+});
+
+test("the session title is renamed through the command path", async ({
+  page,
+  web,
+}) => {
+  await open(page, web);
+  await expect(page.locator("#view-title")).toHaveText("浏览器回归会话");
+  const sent = () =>
+    web.actions
+      .filter((action) => action.type === "send")
+      .map((action) => action.text);
+
+  await page.locator("#rename-session").click();
+  await page.fill("#rename-session-input", "重命名后的会话");
+  await page.locator("#rename-session-input").press("Enter");
+  await expect.poll(sent).toContain("/name 重命名后的会话");
+
+  // Escape 取消：不发动作，标题不变
+  await page.locator("#rename-session").click();
+  await page.fill("#rename-session-input", "不会生效");
+  await page.locator("#rename-session-input").press("Escape");
+  await expect(page.locator("#rename-session-input")).toHaveCount(0);
+  await expect(page.locator("#view-title")).toHaveText("浏览器回归会话");
+  expect(sent()).toHaveLength(1);
 });

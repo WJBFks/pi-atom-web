@@ -248,3 +248,44 @@ test("protocol validators reject malformed actions and events", () => {
     }),
   );
 });
+
+test("protocol accepts paged history prepends and the more_history cursor", () => {
+  // 向前补的更早历史 + 是否已经到最早一条
+  const snapshotWithPage = {
+    ...snapshot,
+    historyComplete: false,
+    prependMessages: [
+      { id: "older-1", role: "user", content: "更早的问题" },
+      { id: "older-2", role: "assistant", content: "更早的回答" },
+    ],
+  };
+  assert.equal(validateSnapshot(snapshotWithPage), snapshotWithPage);
+  assert.equal(
+    validateServerEvent({
+      schemaVersion: 1,
+      type: "patch",
+      streamId: "stream-a",
+      sequence: 2,
+      sessionId: "session-a",
+      patch: { prependMessages: snapshotWithPage.prependMessages, historyComplete: true },
+    }).patch.historyComplete,
+    true,
+  );
+  assert.throws(() => validateSnapshot({ ...snapshot, prependMessages: {} }));
+  assert.throws(() => validateSnapshot({ ...snapshot, prependMessages: [1] }));
+  assert.throws(() => validateSnapshot({ ...snapshot, historyComplete: "yes" }));
+  assert.throws(() =>
+    validateSnapshot({ ...snapshot, prependMessages: new Array(2001).fill({ role: "user" }) }),
+  );
+
+  // more_history 动作必须带游标，且不接受多余字段
+  const action = {
+    type: "more_history",
+    sessionId: "session-a",
+    cursor: "session-a:branch:entry-12",
+  };
+  assert.equal(validateAction(action), action);
+  assert.throws(() => validateAction({ ...action, cursor: undefined }));
+  assert.throws(() => validateAction({ ...action, limit: 10 }));
+  assert.throws(() => validateAction({ ...action, cursor: 12 }));
+});

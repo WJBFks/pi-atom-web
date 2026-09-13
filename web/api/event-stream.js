@@ -1,6 +1,6 @@
 import { validateServerEvent } from "../../shared/protocol.js";
 
-const TOKEN_KEY = "atom-token";
+export const TOKEN_KEY = "atom-token";
 const TOKEN_RE = /^[a-f0-9]{64}$/i;
 
 export function consumeToken(

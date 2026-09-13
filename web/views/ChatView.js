@@ -1,19 +1,40 @@
-import { defineComponent, h, onMounted, onUnmounted, shallowRef } from "vue";
+import {
+  defineComponent,
+  h,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  ref,
+  shallowRef,
+} from "vue";
 import { useSessionStore } from "../stores/session.js";
 import { useComposerStore } from "../stores/composer.js";
+import { useSettingsStore } from "../stores/settings.js";
+import { postAction } from "../api/actions.js";
 import ConversationFeed from "../components/conversation/ConversationFeed.js";
 import ComposerDock from "../components/composer/ComposerDock.js";
 import ColumnResizer from "../components/layout/ColumnResizer.js";
+import ViewTabs from "../components/layout/ViewTabs.js";
+import ContextView from "./ContextView.js";
+import SettingsView from "./SettingsView.js";
 import { icon } from "../icons.js";
+
+// 对话与轨迹共用同一个消息区（只是渲染方式不同），切换 tab 时保持挂载，避免丢失滚动位置。
+const FEED_VIEWS = ["chat", "trace"];
 
 export default defineComponent({
   name: "ChatView",
   props: { token: String, onError: Function },
   setup(props) {
     const session = useSessionStore(),
-      composer = useComposerStore();
+      composer = useComposerStore(),
+      settings = useSettingsStore();
     const atBottom = shallowRef(true);
     const conversationFeed = shallowRef();
+    const renaming = ref(false);
+    const nameDraft = ref("");
+    const nameInput = ref();
+    composer.initView(settings.defaultView);
     let observer, scrollbarObserver;
     onMounted(() => {
       const dock = document.querySelector(".compose-wrap");
@@ -57,27 +78,123 @@ export default defineComponent({
           : session.pending
             ? "消息已排队"
             : "已同步";
+    const startRename = () => {
+      renaming.value = true;
+      nameDraft.value = session.name === "未命名会话" ? "" : session.name;
+      nextTick(() => nameInput.value?.focus?.());
+    };
+    const cancelRename = () => {
+      renaming.value = false;
+    };
+    // 复用 TUI 的 /name 命令：后端会调用 pi.setSessionName() 并回推新名称。
+    const submitRename = async () => {
+      const name = nameDraft.value.trim();
+      renaming.value = false;
+      if (!name || name === session.name) return;
+      try {
+        await postAction(props.token, {
+          type: "send",
+          text: `/name ${name}`,
+          sessionId: session.sessionId,
+          mode: "followUp",
+        });
+      } catch (error) {
+        props.onError?.(error.message);
+      }
+    };
+    const head = () =>
+      h("div", { class: "toolbar-head" }, [
+        renaming.value
+          ? h("input", {
+              ref: nameInput,
+              id: "rename-session-input",
+              class: "rename-input",
+              value: nameDraft.value,
+              "aria-label": "会话名称",
+              onInput: (event) => {
+                nameDraft.value = event.target.value;
+              },
+              onKeydown: (event) => {
+                if (event.key === "Enter") submitRename();
+                else if (event.key === "Escape") cancelRename();
+              },
+              onBlur: cancelRename,
+            })
+          : h("strong", { id: "view-title" }, session.name || "未命名会话"),
+        !renaming.value &&
+          h(
+            "button",
+            {
+              id: "rename-session",
+              type: "button",
+              class: "icon-button",
+              "aria-label": "重命名会话",
+              title: "重命名会话",
+              onClick: startRename,
+            },
+            [icon("edit")],
+          ),
+        h("span", { id: "activity" }, activity()),
+      ]);
     return () =>
       h("div", { class: "layout" }, [
         h("main", [
           h("div", { class: "toolbar" }, [
-            h("div", [
-              h(
-                "strong",
-                { id: "view-title" },
-                composer.view === "trace" ? "执行轨迹" : "对话",
-              ),
-              h("span", { id: "activity" }, activity()),
-            ]),
+            head(),
+            h(ViewTabs, {
+              view: composer.view,
+              onSelect: (view) => composer.setView(view),
+            }),
           ]),
-          h(ConversationFeed, {
-            ref: conversationFeed,
-            trace: composer.view === "trace",
-            onAtBottomChange: (value) => {
-              atBottom.value = value;
-            },
-          }),
-          !atBottom.value
+          h("div", { class: "view-panes" }, [
+            // 消息区始终保留在布局里（只切 visibility），否则切回来时整段 transcript
+            // 要重新布局：300 轮会话实测达 100–130ms 的可见卡顿。
+            h(
+              "div",
+              {
+                class: [
+                  "view-pane",
+                  "feed-pane",
+                  !FEED_VIEWS.includes(composer.view) && "is-inactive",
+                ],
+                id: "view-panel-feed",
+              },
+              [
+                h(ConversationFeed, {
+                  ref: conversationFeed,
+                  trace: composer.view === "trace",
+                  onAtBottomChange: (value) => {
+                    atBottom.value = value;
+                  },
+                }),
+              ],
+            ),
+            h(
+              "div",
+              {
+                class: [
+                  "view-pane",
+                  "page-pane",
+                  composer.view !== "context" && "is-inactive",
+                ],
+                id: "view-panel-context",
+              },
+              [h(ContextView)],
+            ),
+            h(
+              "div",
+              {
+                class: [
+                  "view-pane",
+                  "page-pane",
+                  composer.view !== "settings" && "is-inactive",
+                ],
+                id: "view-panel-settings",
+              },
+              [h(SettingsView)],
+            ),
+          ]),
+          !atBottom.value && FEED_VIEWS.includes(composer.view)
             ? h(
                 "button",
                 {
@@ -90,7 +207,18 @@ export default defineComponent({
                 icon("down"),
               )
             : null,
-          h(ComposerDock, props),
+          // 上下文/设置页不显示输入 dock；保持挂载（否则 ResizeObserver 失去观察目标），
+          // 用 CSS 隐藏让 --compose-height 归零，页面内容才能铺到底部。
+          h(
+            "div",
+            {
+              class: [
+                "dock-host",
+                !FEED_VIEWS.includes(composer.view) && "is-hidden",
+              ],
+            },
+            [h(ComposerDock, props)],
+          ),
           h(ColumnResizer),
         ]),
       ]);

@@ -8,6 +8,7 @@ import {
   watch,
 } from "vue";
 import { useConversationStore } from "../../stores/conversation.js";
+import { useSettingsStore } from "../../stores/settings.js";
 import HistoryFeed from "./HistoryFeed.js";
 import LiveFeed from "./LiveFeed.js";
 
@@ -17,6 +18,7 @@ export default defineComponent({
   emits: ["atBottomChange"],
   setup(props, { emit, expose }) {
     const conversation = useConversationStore();
+    const settings = useSettingsStore();
     const scroll = shallowRef();
     const follow = shallowRef(true);
     let bottomFrame;
@@ -55,7 +57,8 @@ export default defineComponent({
     watch(
       () => [conversation.revision, props.trace],
       () => {
-        if (follow.value) nextTick(bottom);
+        // 关闭「自动跟随最新消息」后，只有手动点回底部才会再跟随。
+        if (follow.value && settings.autoFollow) nextTick(bottom);
       },
       { flush: "post" },
     );

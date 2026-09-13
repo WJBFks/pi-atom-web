@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 import { pickLanAddresses, startServer } from "../extensions/server.ts";
+import {
+  HISTORY_TURNS,
+  historyCutIndex,
+  olderHistory,
+  windowedHistory,
+} from "../extensions/history-window.ts";
 
 /** 用 node:http 发请求，可以伪造 Host / Origin 头（fetch 不允许）。 */
 function request(port, path, headers = {}) {
@@ -228,6 +234,40 @@ test("an invalid initial snapshot can recover on the same SSE connection", async
   assert.equal(recovered.type, "snapshot");
   assert.equal(recovered.sessionId, initial.sessionId);
   assert.equal(recovered.sequence, 0);
+});
+
+test("history window keeps the newest turns and pages backwards by cursor", () => {
+  const messages = Array.from({ length: 25 }).flatMap((_, i) => [
+    { id: `u${i}`, role: "user", content: `问题 ${i}` },
+    { id: `a${i}`, role: "assistant", content: `回答 ${i}` },
+  ]);
+  // 首屏只有最近 10 轮
+  const window = windowedHistory(messages, HISTORY_TURNS);
+  assert.equal(window.messages.length, HISTORY_TURNS * 2);
+  assert.equal(window.messages[0].id, "u15");
+  assert.equal(window.historyComplete, false);
+
+  // 少于 10 轮时整段给完并标记完成
+  const small = windowedHistory(messages.slice(0, 8), HISTORY_TURNS);
+  assert.equal(small.historyComplete, true);
+  assert.equal(small.messages.length, 8);
+
+  // 以客户端最老一条为游标向前翻页，每页同样 10 轮，直到最早一页
+  const first = olderHistory(messages, messages.findIndex((m) => m.id === "u15"));
+  assert.equal(first.messages[0].id, "u5");
+  assert.equal(first.messages.at(-1).id, "a14");
+  assert.equal(first.start, 10);
+  const second = olderHistory(messages, first.start);
+  assert.equal(second.messages[0].id, "u0");
+  assert.equal(second.start, 0);
+  assert.equal(olderHistory(messages, second.start).messages.length, 0);
+
+  // 没有用户消息或轮数不足时都从 0 开始
+  assert.equal(historyCutIndex([], HISTORY_TURNS), 0);
+  assert.equal(
+    historyCutIndex([{ id: "x", role: "assistant", content: "无用户" }], HISTORY_TURNS),
+    0,
+  );
 });
 
 test("lan address picking prefers physical NICs and drops unusable ranges", () => {

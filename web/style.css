@@ -1,4 +1,4 @@
-:root{color-scheme:light;--bg:#fff;--panel:#f2f5f8;--hover:#e8eff5;--border:#dce5ed;--text:#263747;--muted:#607487;--accent:#5488b5;--user:#edf4fa;--tool:#f5f8fb;--tool-running:#b17a29;--tool-success:#438766;--tool-failure:#bd5252;--tool-skill:#7a5fb5;--content-width:860px;--font-mono:"Noto Sans Mono","JetBrains Mono","Fira Code","Consolas",ui-monospace,"Microsoft YaHei",monospace}html.dark{color-scheme:dark;--bg:#1a1a1a;--panel:#242424;--hover:#2e2e2e;--border:#454545;--text:#e8e8e8;--muted:#a4a4a4;--accent:#a4c2f4;--user:#292929;--tool:#222;--tool-running:#d7a34d;--tool-success:#72bd91;--tool-failure:#e17a7a;--tool-skill:#c3a9f2}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 var(--font-mono)}button,select,textarea{font:inherit;color:inherit}button,select{border:1px solid var(--border);border-radius:7px;background:var(--bg);padding:6px 12px;cursor:pointer}button:hover{background:var(--hover)}button:disabled{opacity:.45;cursor:default}button:focus-visible,a:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.muted{color:var(--muted)}.spacer{flex:1}header{height:64px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:20px;padding:0 24px}.brand{display:flex;align-items:center;gap:12px;font-size:27px;font-weight:600;text-decoration:none;color:var(--text)}.brand>span{font-size:18px;font-weight:550}.badge{font-size:11px;border:1px solid var(--border);border-radius:5px;padding:2px 7px;color:var(--muted)}#connection{font-size:12px;color:var(--muted)}.layout{display:flex;height:100dvh}aside{width:246px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--border);padding:30px 22px;display:flex;flex-direction:column}.eyebrow{font-size:10px;letter-spacing:1.8px;color:var(--muted)}h2{font-size:17px;margin:9px 0 3px;overflow-wrap:anywhere}.session-label{font-size:12px;color:var(--muted)}nav{display:grid;gap:6px;margin:30px -8px}nav button{display:flex;gap:14px;text-align:left;background:transparent;border-color:transparent;padding:10px 13px}nav button.active{background:var(--bg);border-color:var(--border);color:var(--accent)}.info label{font-size:11px;color:var(--muted)}.info p{font:12px/1.7 var(--font-mono);margin:5px 0 22px;overflow-wrap:anywhere}.aside-bottom{margin-top:auto;font-size:11px;color:var(--muted)}.aside-bottom p{font-size:11px}.dot{display:inline-block;width:6px;height:6px;background:#70a78b;border-radius:100%;margin-right:5px}main{min-width:0;flex:1;display:flex;flex-direction:column}.toolbar{height:59px;flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 30px}.toolbar strong{font-size:13px}.toolbar span{font-size:12px;margin-left:14px;color:var(--muted)}.toolbar button{font-size:11px;border:0}#scroll{flex:1;overflow:auto;scroll-behavior:smooth}#messages{max-width:var(--content-width,860px);margin:0 auto;padding:30px 28px 55px}.empty{padding:15vh 0;text-align:center}.empty .symbol{font-size:44px;color:var(--accent)}.empty h1{font-size:23px;font-weight:500}.empty p{color:var(--muted)}.message{margin:0 0 8px;overflow-wrap:anywhere}#message-history>*{margin-bottom:8px}.body details{margin:8px 0}
+:root{color-scheme:light;--bg:#fff;--panel:#f2f5f8;--hover:#e8eff5;--border:#dce5ed;--text:#263747;--muted:#607487;--accent:#5488b5;--user:#edf4fa;--tool:#f5f8fb;--tool-running:#b17a29;--tool-success:#438766;--tool-failure:#bd5252;--tool-skill:#7a5fb5;--content-width:860px;--font-mono:"Noto Sans Mono","JetBrains Mono","Fira Code","Consolas",ui-monospace,"Microsoft YaHei",monospace}html.dark{color-scheme:dark;--bg:#1a1a1a;--panel:#242424;--hover:#2e2e2e;--border:#454545;--text:#e8e8e8;--muted:#a4a4a4;--accent:#a4c2f4;--user:#292929;--tool:#222;--tool-running:#d7a34d;--tool-success:#72bd91;--tool-failure:#e17a7a;--tool-skill:#c3a9f2}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 var(--font-mono)}button,select,textarea{font:inherit;color:inherit}button,select{border:1px solid var(--border);border-radius:7px;background:var(--bg);padding:6px 12px;cursor:pointer}button:hover{background:var(--hover)}button:disabled{opacity:.45;cursor:default}button:focus-visible,a:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.muted{color:var(--muted)}.spacer{flex:1}header{height:64px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:20px;padding:0 24px}.brand{display:flex;align-items:center;gap:12px;font-size:27px;font-weight:600;text-decoration:none;color:var(--text)}.brand>span{font-size:18px;font-weight:550}.badge{font-size:11px;border:1px solid var(--border);border-radius:5px;padding:2px 7px;color:var(--muted)}#connection{font-size:12px;color:var(--muted)}.layout{display:flex;height:100dvh}aside{width:246px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--border);padding:30px 22px;display:flex;flex-direction:column}.eyebrow{font-size:10px;letter-spacing:1.8px;color:var(--muted)}h2{font-size:17px;margin:9px 0 3px;overflow-wrap:anywhere}.session-label{font-size:12px;color:var(--muted)}nav{display:grid;gap:6px;margin:30px -8px}nav button{display:flex;gap:14px;text-align:left;background:transparent;border-color:transparent;padding:10px 13px}nav button.active{background:var(--bg);border-color:var(--border);color:var(--accent)}.info label{font-size:11px;color:var(--muted)}.info p{font:12px/1.7 var(--font-mono);margin:5px 0 22px;overflow-wrap:anywhere}.aside-bottom{margin-top:auto;font-size:11px;color:var(--muted)}.aside-bottom p{font-size:11px}.dot{display:inline-block;width:6px;height:6px;background:#70a78b;border-radius:100%;margin-right:5px}main{min-width:0;flex:1;display:flex;flex-direction:column}.toolbar{flex-shrink:0;border-bottom:1px solid var(--border);padding:0 30px}.toolbar strong{font-size:13px}.toolbar span{font-size:12px;margin-left:14px;color:var(--muted)}.toolbar button{font-size:11px;border:0}#scroll{flex:1;overflow:auto;scroll-behavior:smooth}#messages{max-width:var(--content-width,860px);margin:0 auto;padding:30px 28px 55px}.empty{padding:15vh 0;text-align:center}.empty .symbol{font-size:44px;color:var(--accent)}.empty h1{font-size:23px;font-weight:500}.empty p{color:var(--muted)}.message{margin:0 0 8px;overflow-wrap:anywhere}#message-history>*{margin-bottom:8px}.body details{margin:8px 0}
 /* Turn group: one muted title row per assistant turn; contents reuse the normal cards. */
 .turn-group{background:transparent;border:0;border-radius:0;padding:0;font-size:inherit}
 .turn-group>summary{display:list-item;position:relative;padding:3px 0 5px;color:var(--muted);font-size:12px;white-space:nowrap;border-bottom:1px solid var(--border)}
@@ -85,3 +85,106 @@ html,body{height:100%;overflow:hidden}.layout{height:100dvh;min-height:0;align-i
 body.is-resizing{cursor:col-resize;user-select:none}
 @media(max-width:900px){.column-resizer{display:none}}
 @media(prefers-reduced-motion:reduce){.column-resizer-handle{transition:none}}
+
+/* 标题行 + 页面 tab 行：标题行下一条分隔线，tab 行共用工具栏底边，选中 tab 的下划线压在它上面。 */
+.toolbar-head{display:flex;align-items:center;gap:6px;height:52px;border-bottom:1px solid var(--border)}
+#view-title{max-width:60%;overflow:hidden;font-size:15px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+#activity{margin-left:auto;color:var(--muted);font-size:12px;white-space:nowrap}
+.icon-button{display:grid;place-items:center;width:26px;height:26px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--muted)}
+.icon-button:hover{background:var(--hover);color:var(--text)}
+.icon-button .ui-icon{width:15px;height:15px}
+.rename-input{width:min(280px,60%);padding:3px 8px;border:1px solid var(--border);border-radius:7px;background:var(--panel);font:inherit;font-size:15px;font-weight:600}
+.view-tabs{display:flex;gap:2px;margin:0 -6px}
+.view-tabs button{position:relative;border:0;border-radius:0;background:transparent;padding:9px 12px 10px;color:var(--muted);font-size:13px}
+.view-tabs button:hover{background:transparent;color:var(--text)}
+.view-tabs button.active{color:var(--accent);font-weight:600}
+.view-tabs button.active::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:2px;border-radius:2px;background:var(--accent)}
+.view-tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:-4px}
+.view-tabs button:disabled{color:var(--muted);opacity:.5;cursor:not-allowed}
+
+/* 页面 tab（上下文 / 设置）：与消息列同宽居中，底部为固定 dock 留白。
+   关键：切 tab 不把消息区 display:none，否则切回来要重排整段 transcript（实测 100–130ms）。
+   消息区用 visibility 隐藏（保留布局、不重绘），页面作为叠加层盖在上面。 */
+.view-panes{position:relative;flex:1;min-height:0;display:flex;flex-direction:column}
+.view-pane{flex:1;min-height:0;display:flex;flex-direction:column}
+.view-pane.is-inactive{visibility:hidden;pointer-events:none}
+.page-pane{position:absolute;inset:0;display:block;overflow:auto;background:var(--bg);z-index:3;opacity:1;transition:opacity .12s ease}
+.page-pane.is-inactive{opacity:0;transition:none}
+@media(prefers-reduced-motion:reduce){.page-pane{transition:none}}
+.page{max-width:var(--content-width,860px);margin:0 auto;padding:24px 28px calc(var(--compose-height,174px) + 20px)}
+.page-section{margin:0 0 22px;padding:0 0 18px;border-bottom:1px solid var(--border)}
+.page-section:last-of-type{border-bottom:0}
+.page-section>h3{margin:0 0 10px;font-size:14px}
+.page-hint{margin:6px 0 0;color:var(--muted);font-size:12px;line-height:1.6}
+.setting-field{margin:0 0 14px}
+.setting-label{margin:0 0 6px;font-size:13px}
+.setting-inline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.setting-areas{display:flex;flex-direction:column;gap:8px}
+.setting-sublabel{min-width:30px;color:var(--muted);font-size:12px}
+.setting-inline .page-hint{margin:0}
+.setting-number{width:64px;padding:5px 8px;border:1px solid var(--border);border-radius:7px;background:var(--bg);text-align:center;appearance:textfield;-moz-appearance:textfield}
+.setting-number::-webkit-outer-spin-button,.setting-number::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.setting-range{flex:1;min-width:110px;height:20px;margin:0;padding:0;border:0;background:transparent;accent-color:var(--accent);cursor:pointer}
+.setting-range:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.segmented{display:inline-flex;gap:6px;flex-wrap:wrap}
+.segmented button{padding:5px 12px;font-size:13px}
+.segmented button.active{border-color:var(--accent);color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.setting-toggle{display:flex;align-items:center;gap:8px;margin:10px 0 0;font-size:13px;cursor:pointer}
+.setting-toggle input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.setting-action{display:inline-flex;align-items:center;gap:7px;margin-top:10px;font-size:13px}
+.detail-rows{display:flex;flex-direction:column;gap:2px}
+.summary-card{margin:10px 0;padding:12px 14px;border:1px solid var(--border);border-radius:9px;background:var(--panel)}
+.summary-tag{display:inline-block;margin-bottom:6px;color:var(--muted);font-size:12px}
+.page-actions{margin:24px 0 8px}
+
+/* 设置页：左侧分类导航 + 右侧内容。 */
+.settings-page{display:grid;grid-template-columns:168px minmax(0,1fr);gap:24px;align-items:start}
+.settings-nav{position:sticky;top:0;display:flex;flex-direction:column;gap:2px}
+.settings-nav button{text-align:left;border:0;border-radius:7px;background:transparent;padding:7px 10px;color:var(--muted);font-size:13px}
+.settings-nav button:hover{background:var(--hover);color:var(--text)}
+.settings-nav button.active{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent);font-weight:600}
+.settings-nav button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.settings-body{min-width:0}
+.settings-title{margin:0 0 12px;font-size:14px}
+@media(max-width:760px){.settings-page{grid-template-columns:1fr;gap:14px}.settings-nav{position:static;flex-direction:row;flex-wrap:wrap}}
+
+/* 安全区：整个窗口内缩，工具栏不钻到状态栏下，输入框不被底部工具栏盖住。 */
+.layout{padding-top:var(--safe-area-top,0px);padding-bottom:var(--safe-area-bottom,0px)}
+
+/* 上下文/设置页隐藏输入 dock：宿主用 display:contents 不生成盒子，
+   隐藏时整块不占位（ResizeObserver 会把 --compose-height 写成 0）。 */
+.dock-host{display:contents}
+.dock-host.is-hidden .compose-wrap{display:none}
+
+/* pi 系统工具的专门视图：edit 的 -/+ 变更、write 的原始入参二级折叠。 */
+.diff-block{margin:0;border:1px solid var(--border);border-radius:8px;background:var(--panel);overflow-x:auto;font:12px/1.65 var(--font-mono)}
+/* 内容层铺满整条可滚动宽度：这样每一行的 gutter 都能在整个横向滚动范围内吸附 */
+.diff-scroll{width:max-content;min-width:100%}
+.diff-hunk{padding:2px 0}
+.diff-hunk+.diff-hunk{border-top:1px solid var(--border)}
+.diff-line{display:flex;white-space:pre}
+/* 行号 gutter 固定在左侧：整块横向滚动时它不动 */
+.diff-gutter{position:sticky;left:0;z-index:1;display:flex;flex:none;gap:6px;padding:0 8px 0 10px;background:var(--panel)}
+.diff-marker{flex:none;width:1ch;color:var(--muted)}
+.diff-number{flex:none;min-width:3ch;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.diff-text{flex:none;white-space:pre}
+.diff-context{color:var(--muted)}
+.diff-removed{--diff-row-bg:color-mix(in srgb,var(--tool-failure) 13%,var(--panel));background:var(--diff-row-bg);color:var(--tool-failure)}
+.diff-added{--diff-row-bg:color-mix(in srgb,var(--tool-success) 13%,var(--panel));background:var(--diff-row-bg);color:var(--tool-success)}
+.diff-removed .diff-gutter,.diff-added .diff-gutter{background:var(--diff-row-bg)}
+.diff-removed .diff-marker,.diff-removed .diff-number{color:var(--tool-failure)}
+.diff-added .diff-marker,.diff-added .diff-number{color:var(--tool-success)}
+/* bash/powershell 的终端输出：原样、可换行 */
+.shell-output{margin:0;padding:2px 0;font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}
+/* read/bash INPUT 的可读参数行 */
+.tool-params{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;margin:0}
+.tool-params>dt{color:var(--muted)}
+.tool-params>dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+/* 工具自己的提示语（截断/继续读等）：不是代码，放在代码块外单独展示 */
+.tool-notices{margin:8px 0 0;padding:0;list-style:none;color:var(--muted);font-size:12px;line-height:1.6}
+.tool-notices>li{white-space:normal;overflow-wrap:anywhere}
+.tool-raw-input{margin:8px 0 0;padding:0;background:transparent}
+.tool-raw-input>summary{padding:5px 8px;font-size:11px;color:var(--muted)}
+.tool-raw-input>.tool-io-section{padding:0}
+.tool-raw-input .code-block{margin:0}
+@media(max-width:760px){.page{padding:18px 18px calc(var(--compose-height,174px) + 16px)}.view-tabs button{padding:9px 9px 10px}}

@@ -10,8 +10,28 @@ export const messageId = (message) =>
   );
 export const contentBlocks = (content) =>
   Array.isArray(content) ? content : [];
+
+// 一条消息里最后一个思考块的下标（-1 表示没有）：只有它在仍在生成时保持展开，
+// 下一个思考块一出现，前一个就折叠；整段回话结束时全部折叠。
+export function lastThinkingIndex(content) {
+  let last = -1;
+  contentBlocks(content).forEach((block, index) => {
+    if (block?.type === "thinking") last = index;
+  });
+  return last;
+}
 export const toolCallId = (call) => call?.id ?? call?.toolCallId;
 export const toolResultId = (result) => result?.toolCallId;
+
+// 合并两段历史：老的在前，重复 id 以「新的那一段」为准、但保留原有位置。
+// 服务端只发最近若干轮的窗口（会随新轮向前滑动），客户端因此只能做并集，
+// 否则窗口滑出一轮就会在对话中间缺一段。
+export function mergeHistory(older = [], next = []) {
+  const seen = new Map();
+  for (const message of older) seen.set(messageId(message), message);
+  for (const message of next) seen.set(messageId(message), message);
+  return [...seen.values()];
+}
 
 export function buildToolContext(
   messages = [],
@@ -174,6 +194,10 @@ export const useConversationStore = defineStore("conversation", {
     thinkingTimes: new Map(),
     disclosures: new Map(),
     revision: 0,
+    // 更早的历史是否已经全部取回；加载时是否把已加载的中间过程全部折叠。
+    historyComplete: false,
+    collapseLoaded: true,
+    prependedCount: 0,
   }),
   actions: {
     addOptimisticUserMessage(content) {
@@ -208,6 +232,10 @@ export const useConversationStore = defineStore("conversation", {
         this.tools,
         this.toolTimings,
       );
+      this.historyComplete = snapshot.historyComplete !== false;
+      // 首次加载：已加载的中间过程全部折叠（正在生成的那一轮由 busy 决定）。
+      this.collapseLoaded = true;
+      this.prependedCount = 0;
       this.startThinking(nextLive);
       this.revision += 1;
     },
@@ -220,10 +248,22 @@ export const useConversationStore = defineStore("conversation", {
       let migrated = false;
       if ("messages" in patch)
         migrated = applyConversationSnapshot(this, {
-          messages: patch.messages,
+          // 并集：窗口滑动不会丢已加载的轮次
+          messages: mergeHistory(this.messages, patch.messages),
           liveMessage: nextLive,
         });
       else if ("liveMessage" in patch) this.liveMessage = nextLive;
+      if ("prependMessages" in patch && patch.prependMessages?.length) {
+        applyConversationSnapshot(this, {
+          messages: mergeHistory(patch.prependMessages, this.messages),
+          liveMessage: nextLive,
+        });
+        this.prependedCount += 1;
+      }
+      if ("historyComplete" in patch)
+        this.historyComplete = patch.historyComplete !== false;
+      // 新的生成开始时，加载时的「全部折叠」不再适用
+      if (patch.busy === true || patch.liveMessage) this.collapseLoaded = false;
       if ("pendingUserMessages" in patch)
         this.pendingUserMessages = patch.pendingUserMessages || [];
       if ("responseWaitStartedAt" in patch)
@@ -234,7 +274,7 @@ export const useConversationStore = defineStore("conversation", {
         this.thinkingTimes = new Map(Object.entries(patch.thinkingTimings || {}));
       if ("disclosures" in patch)
         this.disclosures = new Map(Object.entries(patch.disclosures || {}));
-      if ("messages" in patch)
+      if ("messages" in patch || "prependMessages" in patch)
         this.historyTools = buildToolContext(
           this.messages,
           this.tools,
@@ -259,6 +299,11 @@ export const useConversationStore = defineStore("conversation", {
       return this.disclosures.has(String(key))
         ? Boolean(this.disclosures.get(String(key)))
         : fallback;
+    },
+    // 客户端当前最老一条的 id，作为 more_history 的游标。
+    oldestMessageId() {
+      const first = this.messages?.[0];
+      return first ? String(messageId(first)) : null;
     },
     configurePersistence(handler) {
       this.persistUiState = () =>

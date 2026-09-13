@@ -1,7 +1,6 @@
-import { defineComponent, h, ref } from "vue";
+import { defineComponent, h } from "vue";
 import { icon } from "../../icons.js";
-import { writeClipboard } from "../../clipboard.js";
-import { statusRows } from "./format.js";
+import DetailRows from "./DetailRows.js";
 
 export default defineComponent({
   name: "StatusPopover",
@@ -12,17 +11,6 @@ export default defineComponent({
     sidebar: Boolean,
   },
   setup(props) {
-    const copied = ref(""),
-      error = ref("");
-    const copy = async (row) => {
-      try {
-        await writeClipboard(row.copy);
-        copied.value = row.label;
-        error.value = "";
-      } catch (cause) {
-        error.value = cause.message;
-      }
-    };
     const titles = {
       session: "会话信息",
       conversation: "对话与轨迹",
@@ -45,26 +33,14 @@ export default defineComponent({
                 ? "session-info-body"
                 : "status-popover-body",
             },
-            statusRows(props.kind, props.session, props.now).map((row) =>
-              h("div", { class: "status-detail", key: row.label }, [
-                h("span", row.label),
-                h("strong", row.value),
-                row.copy !== undefined &&
-                  h(
-                    "button",
-                    {
-                      type: "button",
-                      "data-copy": row.label,
-                      "aria-label": `复制${row.label}`,
-                      onClick: () => copy(row),
-                    },
-                    [icon(copied.value === row.label ? "check" : "copy")],
-                  ),
-              ]),
-            ),
+            [
+              h(DetailRows, {
+                session: props.session,
+                kind: props.kind,
+                now: props.now,
+              }),
+            ],
           ),
-          error.value &&
-            h("p", { role: "alert", class: "failure" }, error.value),
         ],
       );
   },

@@ -13,6 +13,7 @@ export const useComposerStore = defineStore("composer", {
     modelQuery: "",
     popover: null,
     view: "chat",
+    viewTouched: false,
   }),
   getters: {
     commandQuery: (state) => /^\/([^\s]*)$/.exec(state.draft),
@@ -79,6 +80,14 @@ export const useComposerStore = defineStore("composer", {
     closeOverlays() {
       this.picker = null;
       this.popover = null;
+    },
+    // 顶部 tab 切换：只有用户主动切过才覆盖默认视图。
+    initView(value) {
+      if (!this.viewTouched && value) this.view = value;
+    },
+    setView(value) {
+      this.view = value;
+      this.viewTouched = true;
     },
   },
 });

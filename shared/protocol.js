@@ -3,6 +3,8 @@
 const MAX_TEXT_LENGTH = 256 * 1024;
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_IMAGE_BASE64 = Math.ceil((8 * 1024 * 1024 * 4) / 3) + 4;
+// 单次向前补的历史上限（服务端每页远小于它，仅作为不可信输入的上限）。
+const MAX_HISTORY_MESSAGES = 2000;
 
 function fail(message) {
   throw new Error(`无效协议：${message}`);
@@ -226,6 +228,11 @@ export function validateAction(value) {
       timings(action.thinkingTimings || {}, "thinkingTimings");
       disclosures(action.disclosures || {}, "disclosures");
       break;
+    case "more_history":
+      // 按游标向前取更早的一段历史（首次快照只带最近若干轮）。
+      keysOnly(action, ["type", "sessionId", "cursor"], "more_history");
+      string(action.cursor, "cursor", { max: 512 });
+      break;
     default:
       fail("action type 无效");
   }
@@ -278,6 +285,15 @@ function validateField(key, value) {
     case "messages":
       for (const item of value || []) message(item);
       if (!Array.isArray(value)) fail("messages 必须是数组");
+      break;
+    case "prependMessages":
+      // 向前补的更早历史，客户端只做前置拼接，不做替换。
+      if (!Array.isArray(value)) fail("prependMessages 必须是数组");
+      if (value.length > MAX_HISTORY_MESSAGES) fail("prependMessages 过长");
+      for (const item of value) message(item, "prependMessage");
+      break;
+    case "historyComplete":
+      if (typeof value !== "boolean") fail("historyComplete 无效");
       break;
     case "pendingUserMessages":
       for (const item of value || []) {

@@ -30,15 +30,15 @@ export default defineComponent({
           : messageId(entry.message) ?? `m${index}`;
         return render(entry.message, key);
       }
-      const { group, running } = entry;
+      const { group, keepOpen } = entry;
       return h(
         TurnGroup,
         {
           key: group.key,
           blockKey: group.key,
           title: group.title,
-          // 执行中默认展开、结束后自动收起；用户手动操作过则以记录状态为准（在 TurnGroup 内处理）
-          running,
+          // 保持展开直到下一个用户输入开始；用户手动操作过则以记录状态为准（在 TurnGroup 内处理）
+          keepOpen,
         },
         {
           default: () =>
@@ -56,12 +56,11 @@ export default defineComponent({
       const entries = props.trace
         ? messages.map((message) => ({ kind: "message", message }))
         : groupMessages(messages, {
-            // 只有整轮输出完全停下来才自动折叠：会话仍在工作（模型还在生成、
-            // 工具还在执行）、或仍有流式消息与运行中的工具时，最后一轮保持展开。
-            running:
-              session.busy ||
-              Boolean(conversation.liveMessage) ||
-              conversation.tools.length > 0,
+            // 已经显示、尚未进入历史的用户消息也算「下一个用户输入开始」。
+            nextUserInput: conversation.pendingUserMessages.length > 0,
+            // 加载（首次快照）/reload 时已加载的中间过程全部折叠
+            // （会话正在生成时保留正在跑的那一轮）。
+            collapseTail: conversation.collapseLoaded && !session.busy,
           });
       return h("div", { id: "message-history" }, entries.map(renderEntry));
     };

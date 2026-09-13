@@ -1,6 +1,7 @@
 import { defineComponent, h, onMounted, onUnmounted, watch } from "vue";
 import { RouterView } from "vue-router";
 import { useSessionStore } from "../stores/session.js";
+import { useSettingsStore } from "../stores/settings.js";
 import { useConversationStore } from "../stores/conversation.js";
 import { useDialogsStore } from "../stores/dialogs.js";
 import { useComposerStore } from "../stores/composer.js";
@@ -15,12 +16,35 @@ export default defineComponent({
     const dialogs = useDialogsStore(),
       composer = useComposerStore();
     const token = consumeToken(location);
-    document.documentElement.classList.toggle(
-      "dark",
-      localStorage.getItem("atom-theme") === "dark",
-    );
+    // 主题（含跟随系统）、内容列宽度等偏好由 settings store 统一读取并应用。
+    useSettingsStore().load();
     let stream;
     let persistTimer;
+    // 首屏只带最近若干轮：渲染完后在后台逐页向前补齐（新→旧逆序），
+    // 每次都用客户端当前最老一条的 id 当游标，服务端据此再向前切一页。
+    let loadingCursor;
+    let olderTimer;
+    const loadOlderHistory = () => {
+      if (!token || !session.sessionId) return;
+      if (conversation.historyComplete) return;
+      const cursor = conversation.oldestMessageId();
+      if (!cursor || cursor === loadingCursor) return;
+      loadingCursor = cursor;
+      clearTimeout(olderTimer);
+      olderTimer = setTimeout(async () => {
+        try {
+          await postAction(token, {
+            type: "more_history",
+            sessionId: session.sessionId,
+            cursor,
+          });
+        } catch (error) {
+          session.error = error.message;
+        } finally {
+          loadingCursor = undefined;
+        }
+      }, 120);
+    };
     conversation.configurePersistence((state) => {
       clearTimeout(persistTimer);
       persistTimer = setTimeout(() => {
@@ -43,6 +67,7 @@ export default defineComponent({
         conversation.applyPatch(data);
         dialogs.applyPatch(data);
       }
+      loadOlderHistory();
       const old = sessionStorage.getItem("atom-refresh-after-reload");
       if (old && session.instanceId && old !== session.instanceId) {
         sessionStorage.removeItem("atom-refresh-after-reload");
@@ -63,6 +88,7 @@ export default defineComponent({
       stream?.stop();
       stream = undefined;
       clearTimeout(persistTimer);
+      clearTimeout(olderTimer);
     };
     onMounted(() => {
       document.addEventListener("pointerdown", dismiss);

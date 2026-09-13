@@ -7,8 +7,12 @@ const escapeHtml = (value) =>
       ],
   );
 
-export function codeBlock(value, language = "", { highlight = true } = {}) {
+export function codeBlock(value, language = "", { highlight = true, startLine = 1 } = {}) {
   const source = String(value ?? "");
+  const first =
+    Number.isFinite(Number(startLine)) && Number(startLine) > 0
+      ? Math.floor(Number(startLine))
+      : 1;
   const requested = String(language || "")
     .trim()
     .split(/\s+/, 1)[0]
@@ -27,7 +31,10 @@ export function codeBlock(value, language = "", { highlight = true } = {}) {
     rendered = result.value;
   }
   const lineCount = Math.max(1, source.split("\n").length);
-  const lines = Array.from({ length: lineCount }, (_, index) => index + 1).join(
+  const lines = Array.from(
+    { length: lineCount },
+    (_, index) => index + first,
+  ).join(
     "\n",
   );
   return `<div class="code-block"><div class="code-header"><span>${escapeHtml(detected)}</span><span>${lineCount} 行</span><button type="button" class="code-copy">复制</button></div><div class="code-scroll"><pre class="code-lines" aria-hidden="true">${lines}</pre><pre class="code-source"><code class="hljs language-${escapeHtml(detected)}">${rendered}</code></pre></div></div>`;

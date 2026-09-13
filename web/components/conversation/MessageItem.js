@@ -2,6 +2,7 @@ import { Teleport, defineComponent, h, nextTick, onMounted, onUnmounted, ref } f
 import { icon } from "../../icons.js";
 import {
   contentBlocks,
+  lastThinkingIndex,
   messageId,
   toolCallId,
   toolResultId,
@@ -175,6 +176,7 @@ export default defineComponent({
       }
 
       const rawBlocks = contentBlocks(message.content);
+      const thinkingLastIndex = lastThinkingIndex(message.content);
       const userImages =
         message.role === "user"
           ? rawBlocks.filter((block) => block.type === "image")
@@ -202,7 +204,9 @@ export default defineComponent({
                   key: index,
                   text: block.thinking,
                   blockKey: `${key}-thinking-${index}`,
-                  running: props.live,
+                  // 只有最后一个思考块在仍生成时保持展开；下一个思考块一开始，
+                  // 前一个立刻折叠，整段回话结束时（消息离开 live 区）全部折叠。
+                  running: props.live && index === thinkingLastIndex,
                 });
               if (block.type === "toolCall") {
                 const id = toolCallId(block);

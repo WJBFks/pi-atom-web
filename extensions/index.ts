@@ -15,6 +15,13 @@ import {
 import { createSessionStateStore } from "./session-state.ts";
 
 const RELOAD_HANDOFF = Symbol.for("pi-atom-web.reload-handoff");
+import {
+  HISTORY_TURNS,
+  historyCutIndex,
+  olderHistory,
+  windowedHistory,
+} from "./history-window.ts";
+
 const INTERNAL_RELOAD_COMMAND = "pi-atom-web-reload";
 const THINKING_LEVELS = [
   "off",
@@ -400,6 +407,10 @@ export default function atomWeb(pi) {
       thinkingLevels: supportedThinkingLevels(model),
     }));
   }
+  // 首屏只带最近 HISTORY_TURNS 轮：更早的由客户端用 more_history 按游标向前懒加载。
+  function windowedMessages() {
+    return windowedHistory(displayMessages(), HISTORY_TURNS);
+  }
   function snapshot() {
     const value = {
       schemaVersion: 1,
@@ -420,7 +431,7 @@ export default function atomWeb(pi) {
       pending: context.hasPendingMessages(),
       commands: commands(),
       stats: sessionStats(),
-      messages: displayMessages(),
+      ...windowedMessages(),
       pendingUserMessages: pendingUserMessages(),
       responseWaitStartedAt,
       requests: dialogs?.list() || [],
@@ -441,9 +452,20 @@ export default function atomWeb(pi) {
       );
     return value;
   }
+  // 首屏只带最近 HISTORY_TURNS 轮：更早的由客户端用 more_history 按游标向前懒加载。
+  function windowedHistory() {
+    const all = displayMessages();
+    const cut = historyCutIndex(all);
+    return { messages: all.slice(cut), historyComplete: cut === 0 };
+  }
   function publish(ctx, patch = {}, refresh = {}) {
     context = ctx;
     if (server) attachNotifications();
+    // 历史字段在出口统一裁剪成窗口：流式期间不再重复发送整段会话。
+    if (Array.isArray(patch.messages)) {
+      const window = windowedHistory(patch.messages, HISTORY_TURNS);
+      patch = { ...patch, ...window };
+    }
     const sessionChanged =
       lastSessionId !== context.sessionManager.getSessionId();
     if (sessionChanged) {
@@ -517,6 +539,28 @@ export default function atomWeb(pi) {
         disclosures: Object.fromEntries(disclosures),
       });
       return;
+    }
+    if (input.type === "more_history") {
+      // 游标是客户端当前最老一条的 id：向前再取一页，用 prependMessages 追加，
+      // 客户端只做前置拼接，不会影响已渲染内容与滚动位置。
+      const all = displayMessages();
+      const index = all.findIndex(
+        (message) => String(message.id) === String(input.cursor),
+      );
+      if (index <= 0) {
+        publish(context, { historyComplete: true });
+        return { queued: true, count: 0 };
+      }
+      const { messages: chunk, start } = olderHistory(
+        all,
+        index,
+        HISTORY_TURNS,
+      );
+      publish(context, {
+        prependMessages: chunk,
+        historyComplete: start === 0,
+      });
+      return { queued: true, count: chunk.length };
     }
     if (input.type === "abort") {
       context.abort();

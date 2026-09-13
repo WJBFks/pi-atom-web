@@ -238,7 +238,7 @@ export default defineComponent({
       }
       document.body.classList.remove("is-resizing");
       active.value = false;
-      storeContentWidth(desired);
+      commit(desired);
       if (!event?.currentTarget?.matches?.(":hover")) hoverSide = null;
       refresh();
       draw();
@@ -253,17 +253,29 @@ export default defineComponent({
       event.preventDefault();
       refresh();
       hoverSide = side;
-      desired = clampDesired(desired + delta);
-      storeContentWidth(desired);
+      desired = clampDesired(readStoredContentWidth() + delta);
+      commit(desired);
       draw();
     }
 
     function resetWidth() {
       desired = DEFAULT_CONTENT_WIDTH;
-      storeContentWidth(desired);
+      commit(desired);
       draw();
     }
 
+    // 自己改动宽度后广播一次，设置页据此同步显示；设置页的改动也用同一事件回来。
+    const commit = (value) => {
+      storeContentWidth(value);
+      globalThis.dispatchEvent?.(
+        new CustomEvent("atom-content-width", { detail: value }),
+      );
+    };
+    const onExternalWidth = () => {
+      desired = readStoredContentWidth();
+      refresh();
+      draw();
+    };
     const onResize = () => {
       if (drag) return;
       refresh();
@@ -279,12 +291,14 @@ export default defineComponent({
           if (element) observer.observe(element);
       }
       window.addEventListener("resize", onResize);
+      window.addEventListener("atom-content-width", onExternalWidth);
     });
 
     onUnmounted(() => {
       if (frame) cancelAnimationFrame(frame);
       observer?.disconnect();
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("atom-content-width", onExternalWidth);
       document.body.classList.remove("is-resizing");
       document.documentElement.style.removeProperty("--content-width");
     });
