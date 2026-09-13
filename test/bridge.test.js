@@ -427,6 +427,25 @@ test("real bridge updates statistics on same-session branch navigation and rejec
     assert.equal(sent.length, 2);
     assert.equal(sent[0][0], "show immediately");
     assert.equal(sent[1][0], "queued prompt");
+    const imageOnly = await fetch(new URL("/api/action", url), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${connection.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "send",
+        sessionId: "bridge-session",
+        text: "",
+        images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }],
+        mode: "followUp",
+      }),
+    });
+    assert.equal(imageOnly.status, 200);
+    assert.deepEqual(sent[2][0], [
+      { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" },
+    ]);
+    assert.deepEqual(sent[2][1], { deliverAs: "followUp" });
   } finally {
     await reader?.cancel();
     await events.get("session_shutdown")();

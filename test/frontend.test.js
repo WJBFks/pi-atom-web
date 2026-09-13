@@ -81,6 +81,170 @@ test("content width clamps to the viewport and round-trips through storage", () 
   assert.equal(readStoredContentWidth(storage), DEFAULT_CONTENT_WIDTH);
 });
 
+import {
+  buildTurnGroup,
+  groupMessages,
+  turnCounts,
+  turnTitle,
+} from "../web/components/conversation/turnGroups.js";
+
+test("turn counts follow the fixed order and drop empty segments", () => {
+  const messages = [
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "t1" },
+        {
+          type: "toolCall",
+          id: "t1",
+          name: "read",
+          arguments: { path: ".agents/skills/x/SKILL.md" },
+        },
+        { type: "toolCall", id: "t2", name: "bash", arguments: { command: "ls" } },
+        { type: "text", text: "中间说明" },
+      ],
+    },
+    {
+      id: "r1",
+      role: "toolResult",
+      toolCallId: "t1",
+      content: [{ type: "text", text: "技能内容（不算正文段落）" }],
+    },
+    {
+      id: "a2",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "t2" },
+        { type: "text", text: "最终答案" },
+      ],
+    },
+  ];
+  // 原始消息里的计数包含最终输出那条正文
+  assert.deepEqual(turnCounts(messages), {
+    thinking: 2,
+    tools: 2,
+    skills: 1,
+    texts: 2,
+  });
+  // 分组只统计中间过程：最终输出那条正文不计入
+  assert.deepEqual(buildTurnGroup(messages).counts, {
+    thinking: 2,
+    tools: 2,
+    skills: 1,
+    texts: 1,
+  });
+  assert.equal(
+    turnTitle({ thinking: 2, tools: 2, skills: 1, texts: 1 }),
+    "2 次思考过程 · 2 次工具调用 · 1 次技能调用 · 1 条消息",
+  );
+  assert.equal(
+    turnTitle({ thinking: 0, tools: 3, skills: 0, texts: 2 }),
+    "3 次工具调用 · 2 条消息",
+  );
+  assert.equal(
+    turnTitle({ thinking: 1, tools: 0, skills: 0, texts: 0 }),
+    "1 次思考过程",
+  );
+  assert.equal(turnTitle({ thinking: 0, tools: 0, skills: 0, texts: 0 }), "");
+});
+
+test("turn groups keep the final output outside the collapsed middle", () => {
+  const messages = [
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "t1" },
+        { type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls" } },
+      ],
+    },
+    {
+      id: "r1",
+      role: "toolResult",
+      toolCallId: "t1",
+      content: [{ type: "text", text: "out" }],
+    },
+    {
+      id: "a2",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "t2" },
+        { type: "text", text: "最终答案" },
+      ],
+    },
+  ];
+  const items = groupMessages(messages);
+  assert.deepEqual(
+    items.map((item) => item.kind),
+    ["group", "message"],
+  );
+  assert.equal(items[0].group.title, "2 次思考过程 · 1 次工具调用");
+  const { group } = items[0];
+  assert.equal(group.key, "turn-a1");
+  assert.equal(group.finalMessage.id, "a2");
+  // 折叠区里最后一条消息只留最终输出之前的块：下标不变，Thinking identifier 稳定
+  assert.deepEqual(group.intermediate[2].content, [
+    { type: "thinking", thinking: "t2" },
+  ]);
+  assert.deepEqual(items[1].message.content, [
+    { type: "text", text: "最终答案" },
+  ]);
+  assert.equal(items[1].groupKey, "turn-a1");
+  // 含工具调用的消息整条都算中间过程，不会被当成最终输出
+  assert.equal(
+    buildTurnGroup(messages.slice(0, 1)).finalMessage,
+    null,
+  );
+});
+
+test("turn groups skip turns without middle steps and break on other roles", () => {
+  const single = groupMessages([
+    {
+      id: "a1",
+      role: "assistant",
+      content: [{ type: "text", text: "直接回答" }],
+    },
+  ]);
+  assert.equal(single.length, 1);
+  assert.equal(single[0].kind, "message");
+  assert.equal(single[0].message.content[0].text, "直接回答");
+
+  const withNotice = groupMessages([
+    {
+      id: "a1",
+      role: "assistant",
+      content: [{ type: "toolCall", id: "t1", name: "bash", arguments: {} }],
+    },
+    { id: "n1", role: "notification", level: "info", content: "通知" },
+    {
+      id: "a2",
+      role: "assistant",
+      content: [{ type: "toolCall", id: "t2", name: "bash", arguments: {} }],
+    },
+  ]);
+  assert.deepEqual(
+    withNotice.map((item) => item.kind),
+    ["group", "message", "group"],
+  );
+  assert.equal(withNotice[1].message.role, "notification");
+});
+
+test("turn group items never depend on streaming state", () => {
+  const messages = [
+    {
+      id: "a1",
+      role: "assistant",
+      content: [{ type: "toolCall", id: "t1", name: "bash", arguments: {} }],
+    },
+  ];
+  const items = groupMessages(messages);
+  // 分组一律默认收起：条目里不携带任何“仍在生成”之类的状态
+  assert.deepEqual(Object.keys(items[0]).sort(), ["group", "kind"]);
+  assert.equal(items[0].group.key, "turn-a1");
+  assert.equal(items[0].group.title, "1 次工具调用");
+});
+
 test("sub-second durations use a readable collapsed label and retain milliseconds when expanded", () => {
   assert.equal(formatDuration(0, false), "<1s");
   assert.equal(formatDuration(999, false), "<1s");

@@ -80,6 +80,19 @@ test("protocol validators return valid input unchanged", () => {
   assert.equal(validateServerEvent(event), event);
 });
 
+test("send accepts bounded image blocks and image-only prompts", () => {
+  const action = {
+    type: "send",
+    sessionId: "session-a",
+    text: "",
+    images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }],
+    mode: "followUp",
+  };
+  assert.equal(validateAction(action), action);
+  assert.throws(() => validateAction({ ...action, images: [{ mimeType: "image/svg+xml", data: "PHN2Zz4=" }] }));
+  assert.throws(() => validateAction({ ...action, images: [] }));
+});
+
 test("protocol accepts bounded Web-only timing and disclosure state", () => {
   const action = {
     type: "save_ui_state",

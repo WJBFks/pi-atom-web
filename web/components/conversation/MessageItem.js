@@ -1,4 +1,5 @@
-import { defineComponent, h, ref } from "vue";
+import { Teleport, defineComponent, h, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { icon } from "../../icons.js";
 import {
   contentBlocks,
   messageId,
@@ -10,6 +11,67 @@ import ThinkingBlock from "./ThinkingBlock.js";
 import ToolCallBlock from "./ToolCallBlock.js";
 import DisclosureBlock from "./DisclosureBlock.js";
 import CustomEntryBlock from "./CustomEntryBlock.js";
+
+export const PreviewImage = defineComponent({
+  name: "PreviewImage",
+  props: {
+    src: { type: String, required: true },
+    alt: { type: String, default: "图片" },
+    imageClass: String,
+  },
+  setup(props) {
+    const open = ref(false), closeButton = ref(), trigger = ref();
+    const close = () => {
+      open.value = false;
+      nextTick(() => trigger.value?.focus());
+    };
+    const show = () => {
+      open.value = true;
+      nextTick(() => closeButton.value?.focus());
+    };
+    const keydown = (event) => {
+      if (open.value && event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    };
+    onMounted(() => document.addEventListener("keydown", keydown));
+    onUnmounted(() => document.removeEventListener("keydown", keydown));
+    return () => [
+      h("button", {
+        ref: trigger,
+        type: "button",
+        class: "image-preview-trigger",
+        "aria-label": `预览${props.alt}`,
+        "aria-haspopup": "dialog",
+        onClick: show,
+      }, h("img", { class: props.imageClass, src: props.src, alt: props.alt })),
+      open.value
+        ? h(Teleport, { to: "body" }, h("div", {
+            class: "image-preview-overlay",
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-label": props.alt,
+            onClick: close,
+          }, [
+            h("img", {
+              class: "image-preview-full",
+              src: props.src,
+              alt: props.alt,
+              onClick: (event) => event.stopPropagation(),
+            }),
+            h("button", {
+              ref: closeButton,
+              type: "button",
+              class: "image-preview-close",
+              "aria-label": "关闭图片预览",
+              onClick: close,
+            }, icon("close")),
+          ]))
+        : null,
+    ];
+  },
+});
 
 const emptyTools = () => ({
   calls: new Map(),
@@ -112,10 +174,23 @@ export default defineComponent({
         );
       }
 
+      const rawBlocks = contentBlocks(message.content);
+      const userImages =
+        message.role === "user"
+          ? rawBlocks.filter((block) => block.type === "image")
+          : [];
+      const renderImage = (block, index) =>
+        h(PreviewImage, {
+          key: `image-${index}`,
+          imageClass: "message-image",
+          src: `data:${block.mimeType};base64,${block.data}`,
+          alt: `用户上传的图片 ${index + 1}`,
+        });
       const blocks =
         typeof message.content === "string"
           ? [h(MarkdownContent, { text: message.content, live: props.live })]
-          : contentBlocks(message.content).map((block, index) => {
+          : rawBlocks.map((block, index) => {
+              if (message.role === "user" && block.type === "image") return null;
               if (block.type === "text")
                 return h(MarkdownContent, {
                   key: index,
@@ -146,20 +221,26 @@ export default defineComponent({
                 });
               }
               if (block.type === "image")
-                return h("p", { key: index, class: "muted" }, "[图片内容]");
+                return renderImage(block, index);
               return null;
-            });
+            }).filter(Boolean);
+      if (message.role === "user" && userImages.length)
+        return h("article", { class: ["message", "user", "user-with-images"] }, [
+          h(
+            "div",
+            { class: "user-image-strip", "aria-label": "用户上传的图片" },
+            userImages.map(renderImage),
+          ),
+          blocks.length ? h("div", { class: "body user-bubble" }, blocks) : null,
+          message.errorMessage && h("p", { class: "failure" }, message.errorMessage),
+        ]);
       return h(
         "article",
         { class: ["message", message.role === "user" && "user"] },
         [
-          message.role === "user"
+          message.role === "user" || message.role === "assistant"
             ? null
-            : h(
-                "div",
-                { class: "role" },
-                message.role === "assistant" ? "pi" : message.role,
-              ),
+            : h("div", { class: "role" }, message.role),
           h("div", { class: "body" }, blocks),
           message.errorMessage &&
             h("p", { class: "failure" }, message.errorMessage),

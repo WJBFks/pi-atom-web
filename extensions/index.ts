@@ -278,7 +278,7 @@ export default function atomWeb(pi) {
       .map((block) => String(block.text ?? ""))
       .join("");
   }
-  function trackSubmittedPrompt(text, startsImmediately, visible = true) {
+  function trackSubmittedPrompt(content, startsImmediately, visible = true) {
     const sessionId = context.sessionManager.getSessionId();
     const record = {
       sessionId,
@@ -286,7 +286,7 @@ export default function atomWeb(pi) {
       message: {
         id: `${sessionId}:pending-user:${randomUUID()}`,
         role: "user",
-        content: text,
+        content,
       },
       visible,
     };
@@ -555,16 +555,21 @@ export default function atomWeb(pi) {
       publish(context, { thinking: input.level });
       return;
     }
-    if (
-      input.type !== "send" ||
-      typeof input.text !== "string" ||
-      !input.text.trim()
-    )
+    if (input.type !== "send" || typeof input.text !== "string")
       throw new Error("请输入消息");
     if (!["followUp", "steer"].includes(input.mode))
       throw new Error("无效的发送方式");
     const text = input.text.trim();
-    if (text.startsWith("/")) {
+    const images = (input.images || []).map(({ data, mimeType }) => ({
+      type: "image",
+      data,
+      mimeType,
+    }));
+    if (!text && !images.length) throw new Error("请输入消息或添加图片");
+    const content = images.length
+      ? [...(text ? [{ type: "text", text }] : []), ...images]
+      : text;
+    if (!images.length && text.startsWith("/")) {
       const name = text.slice(1).split(/\s/, 1)[0];
       const command = commands().find((command) => command.name === name);
       if (!command) {
@@ -641,9 +646,9 @@ export default function atomWeb(pi) {
       }
     } else {
       const startsImmediately = context.isIdle();
-      const record = trackSubmittedPrompt(text, startsImmediately);
+      const record = trackSubmittedPrompt(content, startsImmediately);
       try {
-        pi.sendUserMessage(text, { deliverAs: input.mode });
+        pi.sendUserMessage(content, { deliverAs: input.mode });
       } catch (error) {
         const index = pendingUserRecords.indexOf(record);
         if (index >= 0) removePendingUserRecord(record);

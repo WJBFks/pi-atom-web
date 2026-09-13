@@ -19,6 +19,7 @@ import CommandMenu from "./CommandMenu.js";
 import ModelPicker from "./ModelPicker.js";
 import ThinkingPicker from "./ThinkingPicker.js";
 import SessionStatus from "../status/SessionStatus.js";
+import { PreviewImage } from "../conversation/MessageItem.js";
 
 const assistantText = (message) =>
   message?.role === "assistant"
@@ -39,12 +40,53 @@ export default defineComponent({
       conversation = useConversationStore(),
       composer = useComposerStore(),
       prompt = ref(),
+      imageInput = ref(),
       dock = ref(),
-      notice = ref("");
+      notice = ref(""),
+      draggingImages = ref(false);
     let noticeTimer,
       observer,
       alive = true;
     const controllers = new Set();
+    const supportedImages = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+    const readImage = (file) =>
+      new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error(`无法读取图片：${file.name}`));
+        reader.onload = () => {
+          const value = String(reader.result || "");
+          resolve({
+            name: file.name || "粘贴的图片",
+            mimeType: file.type,
+            data: value.slice(value.indexOf(",") + 1),
+            url: value,
+            size: file.size,
+          });
+        };
+        reader.readAsDataURL(file);
+      });
+    const addImages = async (files) => {
+      const incoming = [...files].filter((file) => file.type?.startsWith("image/"));
+      if (!incoming.length) return;
+      if (composer.images.length + incoming.length > 4)
+        return props.onError?.(new Error("最多添加 4 张图片"));
+      let total = composer.images.reduce((sum, image) => sum + image.size, 0);
+      for (const file of incoming) {
+        if (!supportedImages.has(file.type))
+          return props.onError?.(new Error(`不支持的图片格式：${file.type || file.name}`));
+        if (file.size > 8 * 1024 * 1024)
+          return props.onError?.(new Error(`单张图片不能超过 8 MiB：${file.name}`));
+        total += file.size;
+      }
+      if (total > 16 * 1024 * 1024)
+        return props.onError?.(new Error("图片总大小不能超过 16 MiB"));
+      try {
+        for (const image of await Promise.all(incoming.map(readImage))) composer.addImage(image);
+        resize();
+      } catch (error) {
+        report(error);
+      }
+    };
     const matches = computed(() => composer.matches(session));
     const commandVisible = computed(() =>
       Boolean(
@@ -192,28 +234,33 @@ export default defineComponent({
     };
     const submit = async () => {
       const text = composer.draft;
+      const images = composer.images.map(({ data, mimeType }) => ({ data, mimeType }));
       if (
-        !text.trim() ||
+        (!text.trim() && !images.length) ||
         composer.sending ||
         session.connection !== "connected"
       )
         return;
       const trimmed = text.trim();
       try {
-        if (await localCommand(trimmed)) return;
-        const reload = trimmed === "/reload";
+        if (!images.length && (await localCommand(trimmed))) return;
+        const reload = !images.length && trimmed === "/reload";
         if (reload)
           sessionStorage.setItem(
             "atom-refresh-after-reload",
             session.instanceId || "legacy",
           );
         const sessionId = session.sessionId;
-        const optimisticId = trimmed.startsWith("/")
+        const optimisticId = !images.length && trimmed.startsWith("/")
           ? null
-          : conversation.addOptimisticUserMessage(trimmed);
+          : conversation.addOptimisticUserMessage(
+              images.length
+                ? [...(trimmed ? [{ type: "text", text: trimmed }] : []), ...images.map((image) => ({ type: "image", ...image }))]
+                : trimmed,
+            );
         composer.sending = true;
         try {
-          await request({ type: "send", text, sessionId, mode: "followUp" });
+          await request({ type: "send", text, images, sessionId, mode: "followUp" });
           if (
             alive &&
             session.sessionId === sessionId &&
@@ -295,6 +342,9 @@ export default defineComponent({
       observer = new ResizeObserver(resize);
       if (main) observer.observe(main);
       document.addEventListener("pointerdown", outside);
+      document.addEventListener("dragover", onDragOver);
+      document.addEventListener("dragleave", onDragLeave);
+      document.addEventListener("drop", onDrop);
     });
     onUnmounted(() => {
       alive = false;
@@ -303,7 +353,25 @@ export default defineComponent({
       for (const controller of controllers) controller.abort();
       controllers.clear();
       document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("dragover", onDragOver);
+      document.removeEventListener("dragleave", onDragLeave);
+      document.removeEventListener("drop", onDrop);
     });
+    const hasDraggedImage = (event) => [...(event.dataTransfer?.items || [])].some((item) => item.kind === "file" && item.type.startsWith("image/"));
+    const onDragOver = (event) => {
+      if (!hasDraggedImage(event)) return;
+      event.preventDefault();
+      draggingImages.value = true;
+    };
+    const onDragLeave = (event) => {
+      if (!event.relatedTarget) draggingImages.value = false;
+    };
+    const onDrop = (event) => {
+      if (!hasDraggedImage(event)) return;
+      event.preventDefault();
+      draggingImages.value = false;
+      addImages(event.dataTransfer.files);
+    };
     return () =>
       h("section", { ref: dock, class: "compose-wrap" }, [
         h(RequestDock, props),
@@ -317,6 +385,7 @@ export default defineComponent({
           "form",
           {
             id: "composer",
+            class: { "image-dragging": draggingImages.value },
             onSubmit: (event) => {
               event.preventDefault();
               submit();
@@ -348,9 +417,55 @@ export default defineComponent({
                 resize();
               },
               onKeydown: keydown,
+              onPaste: (event) => {
+                const files = [...(event.clipboardData?.items || [])]
+                  .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+                  .map((item) => item.getAsFile())
+                  .filter(Boolean);
+                if (files.length) {
+                  event.preventDefault();
+                  addImages(files);
+                }
+              },
             }),
+            composer.images.length
+              ? h("div", { class: "image-attachments", "aria-label": "待发送图片" },
+                  composer.images.map((image, index) =>
+                    h("div", { class: "image-attachment", key: `${image.name}-${index}` }, [
+                      h(PreviewImage, { src: image.url, alt: image.name, imageClass: "attachment-image" }),
+                      h("button", {
+                        type: "button",
+                        class: "image-remove",
+                        "aria-label": `移除图片 ${image.name}`,
+                        onClick: () => composer.removeImage(index),
+                      }, "×"),
+                    ]),
+                  ),
+                )
+              : null,
             h("div", { class: "compose-actions" }, [
-              h("div", { class: "compose-left" }),
+              h("div", { class: "compose-left" }, [
+                h("input", {
+                  ref: imageInput,
+                  class: "image-input",
+                  type: "file",
+                  accept: "image/png,image/jpeg,image/gif,image/webp",
+                  multiple: true,
+                  onChange: (event) => {
+                    addImages(event.target.files || []);
+                    event.target.value = "";
+                  },
+                }),
+                h("button", {
+                  id: "image-button",
+                  type: "button",
+                  class: "composer-icon",
+                  "aria-label": "添加图片",
+                  title: "添加图片",
+                  disabled: composer.sending,
+                  onClick: () => imageInput.value?.click(),
+                }, icon("image")),
+              ]),
               h("div", { class: "compose-right" }, [
                 h(
                   "button",
@@ -400,7 +515,7 @@ export default defineComponent({
                     id: "send",
                     "aria-label": "发送",
                     disabled:
-                      !composer.draft.trim() ||
+                      (!composer.draft.trim() && !composer.images.length) ||
                       composer.sending ||
                       session.connection !== "connected",
                   },

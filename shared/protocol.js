@@ -1,6 +1,8 @@
 /** @typedef {{ schemaVersion: 1, type: 'snapshot'|'patch', streamId: string, sequence: number, sessionId: string, snapshot?: object, patch?: object }} ServerEvent */
 
 const MAX_TEXT_LENGTH = 256 * 1024;
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MAX_IMAGE_BASE64 = Math.ceil((8 * 1024 * 1024 * 4) / 3) + 4;
 
 function fail(message) {
   throw new Error(`无效协议：${message}`);
@@ -137,9 +139,20 @@ export function validateAction(value) {
   sessionId(action.sessionId);
   switch (action.type) {
     case "send":
-      keysOnly(action, ["type", "sessionId", "text", "mode"], "send");
-      string(action.text, "text", { max: MAX_TEXT_LENGTH });
-      if (!action.text.trim() || !["followUp", "steer"].includes(action.mode))
+      keysOnly(action, ["type", "sessionId", "text", "images", "mode"], "send");
+      string(action.text, "text", { empty: true, max: MAX_TEXT_LENGTH });
+      if (action.images !== undefined && !Array.isArray(action.images)) fail("send.images 无效");
+      if ((action.images || []).length > 4) fail("send.images 无效");
+      let imageBytes = 0;
+      for (const image of action.images || []) {
+        keysOnly(object(image, "image"), ["mimeType", "data"], "image");
+        if (!IMAGE_TYPES.has(image.mimeType)) fail("图片格式不受支持");
+        string(image.data, "image.data", { max: MAX_IMAGE_BASE64 });
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)) fail("图片数据无效");
+        imageBytes += Math.floor((image.data.length * 3) / 4);
+      }
+      if (imageBytes > 16 * 1024 * 1024) fail("图片总大小超过限制");
+      if ((!action.text.trim() && !(action.images || []).length) || !["followUp", "steer"].includes(action.mode))
         fail("send 参数无效");
       break;
     case "abort":

@@ -427,6 +427,9 @@ test("tool input, progress and final result share one card with final timing", a
   const errors = await open(page, web);
   await expect(page.locator(".tool-block")).toHaveCount(1);
   await expect(page.locator(".tool-block")).toHaveClass(/disclosure-block/);
+  // 中间过程默认收进按轮折叠块，先展开这一轮再操作卡片
+  await expect(page.locator(".turn-group > summary")).toHaveCount(1);
+  await page.locator(".turn-group > summary").click();
   await page.locator(".tool-block summary").click();
   await expect(page.locator(".tool-block .code-source code")).toContainText(
     "README.md",
@@ -538,6 +541,58 @@ test("skill reads render as a purple skill card with the skill name", async ({
   expect(errors).toEqual([]);
 });
 
+test("turn groups collapse the middle steps and stay collapsed while streaming", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    messages: [
+      ...fixture().messages,
+      { id: "turn-u1", role: "user", content: "第一轮问题" },
+      {
+        id: "turn-a1",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先读一下" },
+          { type: "toolCall", id: "call-turn", name: "bash", arguments: { command: "ls" } },
+        ],
+      },
+      {
+        id: "turn-r1",
+        role: "toolResult",
+        toolCallId: "call-turn",
+        content: [{ type: "text", text: "out" }],
+        isError: false,
+      },
+      {
+        id: "turn-a2",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "收尾" },
+          { type: "text", text: "最终答案" },
+        ],
+      },
+    ],
+    tools: [],
+    liveMessage: { id: "live-turn", role: "assistant", content: "正在生成" },
+  });
+  const errors = await open(page, web);
+  const group = page.locator(".turn-group");
+  await expect(group).toHaveCount(1);  await expect(group.locator(".turn-title")).toHaveText(
+    "2 次思考过程 · 1 次工具调用",
+  );
+  // 即使会话仍在生成，也一律保持收起
+  await expect(group).not.toHaveAttribute("open", "");
+  // 最终输出留在折叠块之外
+  await expect(page.locator("#message-history > .message").last()).toContainText(
+    "最终答案",
+  );
+  await page.locator(".turn-group > summary").click();
+  await expect(group).toHaveAttribute("open", "");
+  await expect(group.locator(".thinking-block").first()).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test("untouched Thinking collapses on completion and code blocks keep copyable source separate", async ({
   page,
   web,
@@ -599,6 +654,44 @@ test("streaming updates preserve historical node identity and input focus", asyn
   ).resolves.toBe(true);
 });
 
+test("manual upward scroll immediately pauses following until returning to bottom", async ({
+  page,
+  web,
+}) => {
+  await open(page, web);
+  await page.locator("#messages").evaluate((node) => {
+    node.style.minHeight = "2400px";
+  });
+  await page.locator("#scroll").evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect(page.locator("#jump-to-bottom")).toHaveCount(0);
+
+  const pausedTop = await page.locator("#scroll").evaluate((node) => {
+    node.scrollTop -= 2;
+    return node.scrollTop;
+  });
+  await expect(page.locator("#jump-to-bottom")).toBeVisible();
+
+  web.publish({
+    liveMessage: { id: "scroll-follow", role: "assistant", content: "新增流式内容" },
+  });
+  await expect(page.locator("#message-live")).toContainText("新增流式内容");
+  await expect
+    .poll(() => page.locator("#scroll").evaluate((node) => node.scrollTop))
+    .toBe(pausedTop);
+
+  await page.locator("#jump-to-bottom").click();
+  await expect(page.locator("#jump-to-bottom")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.locator("#scroll").evaluate(
+        (node) => node.scrollHeight - node.scrollTop - node.clientHeight,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+});
+
 test("submitted prompt appears before model response and delayed waiting status clears on response", async ({
   page,
   web,
@@ -647,6 +740,56 @@ test("submitted prompt appears before model response and delayed waiting status 
     { timeout: 150 },
   );
   await expect(page.locator("#message-live .message.user")).toHaveCount(0);
+});
+
+test("images can be selected, pasted and dropped into a thumbnail strip above the user bubble", async ({
+  page,
+  web,
+}) => {
+  await open(page, web);
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  await expect(page.locator("#image-button")).toBeVisible();
+  await page.locator(".image-input").setInputFiles({ name: "selected.png", mimeType: "image/png", buffer: png });
+  await expect(page.locator(".image-attachment")).toHaveCount(1);
+  await page.locator(".image-attachment .image-preview-trigger").click();
+  await expect(page.locator(".image-preview-overlay")).toBeVisible();
+  await expect(page.locator(".image-preview-full")).toHaveAttribute("alt", "selected.png");
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".image-preview-overlay")).toHaveCount(0);
+  await page.evaluate((base64) => {
+    const bytes = Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], "pasted.png", { type: "image/png" }));
+    document.querySelector("#prompt").dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }));
+  }, png.toString("base64"));
+  await expect(page.locator(".image-attachment")).toHaveCount(2);
+  await page.evaluate((base64) => {
+    const bytes = Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], "dropped.png", { type: "image/png" }));
+    document.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  }, png.toString("base64"));
+  await expect(page.locator(".image-attachment")).toHaveCount(3);
+  await page.locator("#prompt").fill("图片说明");
+  await expect(page.locator("#send")).toBeEnabled();
+  await page.locator("#send").click();
+  await expect.poll(() => web.actions.length).toBe(1);
+  expect(web.actions[0].text).toBe("图片说明");
+  expect(web.actions[0].images).toHaveLength(3);
+  expect(web.actions[0].images.every((image) => image.mimeType === "image/png")).toBe(true);
+  await expect(page.locator("#message-live .message.user .message-image")).toHaveCount(3);
+  await expect(page.locator("#message-live .user-image-strip")).toBeVisible();
+  await expect(page.locator("#message-live .user-bubble")).toContainText("图片说明");
+  const sentPreview = page.locator("#message-live .user-image-strip .image-preview-trigger").first();
+  await expect(sentPreview).toHaveCSS("width", "80px");
+  await expect(sentPreview).toHaveCSS("height", "80px");
+  await sentPreview.click();
+  await expect(page.locator(".image-preview-overlay")).toBeVisible();
+  await page.locator(".image-preview-close").click();
+  await expect(page.locator(".image-preview-overlay")).toHaveCount(0);
 });
 
 test("manual Thinking state remains open when the live turn completes", async ({

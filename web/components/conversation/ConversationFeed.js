@@ -3,6 +3,7 @@ import {
   h,
   nextTick,
   onMounted,
+  onUnmounted,
   shallowRef,
   watch,
 } from "vue";
@@ -13,10 +14,12 @@ import LiveFeed from "./LiveFeed.js";
 export default defineComponent({
   name: "ConversationFeed",
   props: { trace: Boolean },
-  setup(props) {
+  emits: ["atBottomChange"],
+  setup(props, { emit, expose }) {
     const conversation = useConversationStore();
     const scroll = shallowRef();
     const follow = shallowRef(true);
+    let bottomFrame;
     const bottom = () => {
       const node = scroll.value;
       if (node && follow.value)
@@ -24,11 +27,31 @@ export default defineComponent({
     };
     const track = () => {
       const node = scroll.value;
-      follow.value = Boolean(
-        node && node.scrollHeight - node.scrollTop - node.clientHeight < 100,
+      const next = Boolean(
+        node && node.scrollHeight - node.scrollTop - node.clientHeight <= 1,
       );
+      if (next === follow.value) return;
+      follow.value = next;
+      emit("atBottomChange", next);
     };
-    onMounted(bottom);
+    const scrollToBottom = () => {
+      if (!follow.value) {
+        follow.value = true;
+        emit("atBottomChange", true);
+      }
+      bottom();
+      nextTick(() => {
+        bottom();
+        cancelAnimationFrame(bottomFrame);
+        bottomFrame = requestAnimationFrame(bottom);
+      });
+    };
+    expose({ scrollToBottom });
+    onMounted(() => {
+      scrollToBottom();
+      nextTick(track);
+    });
+    onUnmounted(() => cancelAnimationFrame(bottomFrame));
     watch(
       () => [conversation.revision, props.trace],
       () => {

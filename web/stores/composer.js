@@ -3,6 +3,7 @@ import { defineStore } from "pinia";
 export const useComposerStore = defineStore("composer", {
   state: () => ({
     draft: "",
+    images: [],
     drafts: new Map(),
     sending: false,
     commandIndex: 0,
@@ -42,8 +43,15 @@ export const useComposerStore = defineStore("composer", {
     },
     clear() {
       this.draft = "";
+      this.images = [];
       this.dismissed = "";
       this.commandIndex = 0;
+    },
+    addImage(image) {
+      this.images.push(image);
+    },
+    removeImage(index) {
+      this.images.splice(index, 1);
     },
     dismissCommands() {
       this.dismissed = this.draft;

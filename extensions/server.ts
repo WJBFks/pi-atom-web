@@ -211,7 +211,7 @@ export async function startServer({ snapshot, action, connection }) {
         const chunks = [];
         for await (const chunk of req) {
           size += chunk.length;
-          if (size > 256 * 1024) {
+          if (size > 24 * 1024 * 1024) {
             reply(413, { error: "消息过长" });
             return;
           }

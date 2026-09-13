@@ -1,4 +1,4 @@
-import { defineComponent, h, onMounted, onUnmounted } from "vue";
+import { defineComponent, h, onMounted, onUnmounted, shallowRef } from "vue";
 import { useSessionStore } from "../stores/session.js";
 import { useComposerStore } from "../stores/composer.js";
 import ConversationFeed from "../components/conversation/ConversationFeed.js";
@@ -12,6 +12,8 @@ export default defineComponent({
   setup(props) {
     const session = useSessionStore(),
       composer = useComposerStore();
+    const atBottom = shallowRef(true);
+    const conversationFeed = shallowRef();
     let observer, scrollbarObserver;
     onMounted(() => {
       const dock = document.querySelector(".compose-wrap");
@@ -45,8 +47,7 @@ export default defineComponent({
       document.documentElement.style.removeProperty("--scrollbar-width");
     });
     const bottom = () => {
-      const scroll = document.querySelector("#scroll");
-      if (scroll) scroll.scrollTop = scroll.scrollHeight;
+      conversationFeed.value?.scrollToBottom();
     };
     const activity = () =>
       session.connection !== "connected"
@@ -68,12 +69,27 @@ export default defineComponent({
               ),
               h("span", { id: "activity" }, activity()),
             ]),
-            h("button", { id: "bottom", onClick: bottom }, [
-              icon("down"),
-              "最新消息",
-            ]),
           ]),
-          h(ConversationFeed, { trace: composer.view === "trace" }),
+          h(ConversationFeed, {
+            ref: conversationFeed,
+            trace: composer.view === "trace",
+            onAtBottomChange: (value) => {
+              atBottom.value = value;
+            },
+          }),
+          !atBottom.value
+            ? h(
+                "button",
+                {
+                  id: "jump-to-bottom",
+                  type: "button",
+                  "aria-label": "跳到最新消息",
+                  title: "跳到最新消息",
+                  onClick: bottom,
+                },
+                icon("down"),
+              )
+            : null,
           h(ComposerDock, props),
           h(ColumnResizer),
         ]),
