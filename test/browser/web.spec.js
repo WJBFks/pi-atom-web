@@ -554,6 +554,7 @@ test("turn groups expand while the turn runs and collapse once it ends", async (
         role: "assistant",
         content: [
           { type: "thinking", thinking: "先读一下" },
+          { type: "text", text: "中间说明" },
           { type: "toolCall", id: "call-turn", name: "bash", arguments: { command: "ls" } },
         ],
       },
@@ -574,22 +575,41 @@ test("turn groups expand while the turn runs and collapse once it ends", async (
       },
     ],
     tools: [],
+    busy: true,
     liveMessage: { id: "live-turn", role: "assistant", content: "正在生成" },
   });
   const errors = await open(page, web);
   const group = page.locator(".turn-group");
   await expect(group).toHaveCount(1);  await expect(group.locator(".turn-title")).toHaveText(
-    "2 次思考过程 · 1 次工具调用",
+    "2 次思考过程 · 1 次工具调用 · 1 条消息",
   );
   // 执行中默认展开：折叠区里的卡片可见
   await expect(group).toHaveAttribute("open", "");
   await expect(group.locator(".thinking-block").first()).toBeVisible();
+  // 折叠区里的中间消息与最终输出同款排版（字号/行高一致）
+  const sizes = await page.evaluate(() => {
+    const read = (el) => {
+      const style = getComputedStyle(el);
+      return [style.fontSize, style.lineHeight];
+    };
+    const inner = [...document.querySelectorAll(".turn-group .disclosure-body > .message")].find(
+      (message) => message.textContent.includes("中间说明"),
+    );
+    const final = [...document.querySelectorAll("#message-history > .message")].find(
+      (message) => message.textContent.includes("最终答案"),
+    );
+    return { inner: read(inner), final: read(final) };
+  });
+  expect(sizes.inner).toEqual(sizes.final);
   // 最终输出留在折叠块之外
   await expect(page.locator("#message-history > .message").last()).toContainText(
     "最终答案",
   );
-  // 中间过程结束（不再有流式消息与运行中的工具）后自动折叠
-  web.publish({ liveMessage: null, tools: [] });
+  // 流式消息结束但会话仍在工作（工具还在跑 / 模型还要继续）时不折叠
+  web.publish({ liveMessage: null, tools: [], busy: true });
+  await expect(group).toHaveAttribute("open", "");
+  // 整轮输出完全停止后才自动折叠
+  web.publish({ busy: false });
   await expect(group).not.toHaveAttribute("open", "");
   // 仍然可以手动展开
   await page.locator(".turn-group > summary").click();

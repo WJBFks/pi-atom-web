@@ -1,5 +1,6 @@
 import { defineComponent, h } from "vue";
 import { messageId, useConversationStore } from "../../stores/conversation.js";
+import { useSessionStore } from "../../stores/session.js";
 import MessageItem from "./MessageItem.js";
 import TurnGroup from "./TurnGroup.js";
 import { groupMessages } from "./turnGroups.js";
@@ -19,6 +20,7 @@ export default defineComponent({
   props: { trace: Boolean },
   setup(props) {
     const conversation = useConversationStore();
+    const session = useSessionStore();
     const render = (message, key) =>
       h(MessageItem, { key, message, tools: conversation.historyTools });
     const renderEntry = (entry, index) => {
@@ -54,7 +56,10 @@ export default defineComponent({
       const entries = props.trace
         ? messages.map((message) => ({ kind: "message", message }))
         : groupMessages(messages, {
+            // 只有整轮输出完全停下来才自动折叠：会话仍在工作（模型还在生成、
+            // 工具还在执行）、或仍有流式消息与运行中的工具时，最后一轮保持展开。
             running:
+              session.busy ||
               Boolean(conversation.liveMessage) ||
               conversation.tools.length > 0,
           });
