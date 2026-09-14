@@ -20,6 +20,7 @@ import { formatDuration } from "../web/components/conversation/ToolCallBlock.js"
 import { skillLabel } from "../web/components/conversation/ToolCallBlock.js";
 import {
   editHunks,
+  isPlainOutputTool,
   languageFromPath,
   parseToolDiff,
   resultText,
@@ -182,6 +183,23 @@ test("code blocks can start numbering from an offset and read/bash keep raw text
     content: "code\n\n[link]",
     notices: [],
   });
+  // 多行提示（内含指路的 bash 命令）整体算一条
+  assert.deepEqual(
+    splitToolNotices(
+      "content\n\n[Line 12 is 5MB, exceeds 256KB limit. Use bash:\n sed -n '12p' big.txt | head -c 262144]",
+    ),
+    {
+      content: "content",
+      notices: [
+        "[Line 12 is 5MB, exceeds 256KB limit. Use bash:\nsed -n '12p' big.txt | head -c 262144]",
+      ],
+    },
+  );
+  // 结尾不是 ] 时不算提示语（例如 JSON 文件以数组结尾）
+  assert.deepEqual(splitToolNotices("{\n\n[1,2,3]"), {
+    content: "{\n\n[1,2,3]",
+    notices: [],
+  });
   assert.deepEqual(splitToolNotices("no notice"), {
     content: "no notice",
     notices: [],
@@ -208,7 +226,8 @@ test("read inputs become readable rows while shell inputs become script blocks",
   ]);
   // bash/powershell 走代码块，不再用参数行
   assert.deepEqual(toolInputRows("bash", { command: "npm test" }), []);
-  assert.deepEqual(toolInputRows("grep", { pattern: "x" }), []);
+  // 没有专门参数行的工具（如 edit/write）仍直接展示 JSON
+  assert.deepEqual(toolInputRows("edit", { file_path: "a.ts" }), []);
   assert.deepEqual(toolInputRows("read", null), []);
 
   // 命令按对应语言高亮；非 shell 工具或空命令返回 null
@@ -223,6 +242,55 @@ test("read inputs become readable rows while shell inputs become script blocks",
   assert.equal(toolCommand("read", { command: "x" }), null);
   assert.equal(toolCommand("bash", { command: "" }), null);
   assert.equal(toolCommand("bash", null), null);
+});
+
+test("grep/find/ls inputs, titles and plain-text outputs follow the host", () => {
+  assert.deepEqual(
+    toolInputRows("grep", {
+      pattern: "TODO",
+      path: "src",
+      glob: "*.ts",
+      ignoreCase: true,
+      literal: true,
+      context: 2,
+      limit: 50,
+    }),
+    [
+      { label: "模式", value: "TODO" },
+      { label: "路径", value: "src" },
+      { label: "文件过滤", value: "*.ts" },
+      { label: "忽略大小写", value: "是" },
+      { label: "按字面量", value: "是" },
+      { label: "上下文行数", value: "2" },
+      { label: "上限", value: "50" },
+    ],
+  );
+  // 缺省项不显示
+  assert.deepEqual(toolInputRows("grep", { pattern: "x" }), [
+    { label: "模式", value: "x" },
+  ]);
+  assert.deepEqual(toolInputRows("find", { pattern: "*.md" }), [
+    { label: "模式", value: "*.md" },
+  ]);
+  assert.deepEqual(toolInputRows("ls", { path: "src", limit: 20 }), [
+    { label: "路径", value: "src" },
+    { label: "上限", value: "20" },
+  ]);
+
+  // 标题主参数：grep/find 用 pattern（与宿主一致），read/write/edit 用 file_path
+  assert.equal(toolTitleArgument({ pattern: "TODO", path: "src" }, "grep"), "TODO");
+  assert.equal(toolTitleArgument({ pattern: "*.md" }, "find"), "*.md");
+  assert.equal(
+    toolTitleArgument({ file_path: "a.ts", pattern: "x" }, "read"),
+    "a.ts",
+  );
+  assert.equal(toolTitleArgument({ command: "ls" }, "bash"), "ls");
+
+  // 结果必须原样展示（不过 markdown）的工具集合
+  for (const tool of ["bash", "powershell", "grep", "find", "ls"])
+    assert.equal(isPlainOutputTool(tool), true);
+  for (const tool of ["read", "write", "edit", "unknown"])
+    assert.equal(isPlainOutputTool(tool), false);
 });
 
 test("skill reads follow the host definition: read tool plus a SKILL.md basename", () => {
@@ -555,12 +623,19 @@ test("loading collapses every loaded middle-step group", () => {
       .map((item) => item.keepOpen),
     [false, true],
   );
-  // 加载（/reload）时：包括末尾那一轮在内全部折叠
+  // 加载（首次快照 / /reload）：已加载的中间过程全部折叠
   assert.deepEqual(
-    groupMessages(messages, { collapseTail: true })
+    groupMessages(messages, { collapseLoaded: true })
       .filter((item) => item.kind === "group")
       .map((item) => item.keepOpen),
     [false, false],
+  );
+  // 加载时会话还在生成：保留正在跑的那一轮
+  assert.deepEqual(
+    groupMessages(messages, { collapseLoaded: true, running: true })
+      .filter((item) => item.kind === "group")
+      .map((item) => item.keepOpen),
+    [false, true],
   );
 });
 

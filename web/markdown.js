@@ -37,7 +37,8 @@ export function codeBlock(value, language = "", { highlight = true, startLine = 
   ).join(
     "\n",
   );
-  return `<div class="code-block"><div class="code-header"><span>${escapeHtml(detected)}</span><span>${lineCount} 行</span><button type="button" class="code-copy">复制</button></div><div class="code-scroll"><pre class="code-lines" aria-hidden="true">${lines}</pre><pre class="code-source"><code class="hljs language-${escapeHtml(detected)}">${rendered}</code></pre></div></div>`;
+  const copyButton = `<button type="button" class="code-copy" aria-label="复制" title="复制"><span class="icon-copy"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5H5v11h3"/></svg></span><span class="icon-done"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></span></button>`;
+  return `<div class="code-block"><div class="code-header"><span>${escapeHtml(detected)}</span><span>${lineCount} 行</span>${copyButton}</div><div class="code-scroll"><pre class="code-lines" aria-hidden="true">${lines}</pre><pre class="code-source"><code class="hljs language-${escapeHtml(detected)}">${rendered}</code></pre></div></div>`;
 }
 
 export function unclosedFence(raw) {
@@ -57,7 +58,7 @@ export function configureMarkdown() {
   if (globalThis.marked) globalThis.marked.__atomWebConfigured = true;
 }
 
-export function renderMarkdown(text, { live = false } = {}) {
+export function renderMarkdown(text, { live = false, breaks = false } = {}) {
   if (!globalThis.marked || !globalThis.DOMPurify) return "";
   const renderer =
     typeof globalThis.marked.Renderer === "function"
@@ -67,7 +68,7 @@ export function renderMarkdown(text, { live = false } = {}) {
     codeBlock(token.text, token.lang, {
       highlight: !(live && unclosedFence(token.raw)),
     });
-  const html = globalThis.marked.parse(String(text || ""), { renderer });
+  const html = globalThis.marked.parse(String(text || ""), { renderer, breaks });
   return globalThis.DOMPurify.sanitize(html, {
     FORBID_TAGS: ["img", "style", "input", "form"],
     FORBID_ATTR: ["style"],

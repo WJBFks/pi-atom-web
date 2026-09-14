@@ -38,12 +38,13 @@ export default defineComponent({
           class: "custom-entry-block",
           blockKey: props.message.id,
           "data-custom-entry": props.message.customType,
+          icon: "box",
         },
         {
           summary: () => [
             h("span", { class: "disclosure-summary-row" }, [
               h("strong", props.message.customType),
-              h("span", { class: "disclosure-meta" }, "自定义 Entry"),
+              h("span", { class: "disclosure-separator" }, "·"),
               h("span", { class: "disclosure-preview custom-entry-preview" }, preview.value),
             ]),
           ],

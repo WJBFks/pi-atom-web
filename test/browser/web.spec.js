@@ -1,6 +1,7 @@
 import { test as base, expect } from "@playwright/test";
 import { startServer } from "../../extensions/server.ts";
 import {
+  HISTORY_PAGE_TURNS,
   HISTORY_TURNS,
   olderHistory,
   windowedHistory,
@@ -235,7 +236,7 @@ test("long history keeps its nodes and does not steal scroll position during str
   });
 });
 
-test("questionnaire preserves multi selections with custom text and submits plain answers", async ({
+test("multi checkboxes and free text are independent stores, matching the host questionnaire", async ({
   page,
   web,
 }) => {
@@ -267,14 +268,41 @@ test("questionnaire preserves multi selections with custom text and submits plai
       'link[href="/packages/@juicesharp/rpiv-ask-user-question/style.css"]',
     ),
   ).toHaveCount(1);
+
+  // bug4（用户报告）：**先**勾自定义行、还没输入任何内容，再勾其它选项 ——
+  // 自定义行自己的勾选态不能被取消（它不能由 text 反推）。
+  await page.locator("[data-ask-custom]").check();
+  await expect(page.locator("[data-ask-custom]")).toBeChecked();
+  await page.locator('[data-ask-option="0"]').check();
+  await expect(page.locator("[data-ask-custom]")).toBeChecked();
+  await page.locator('[data-ask-option="0"]').uncheck();
+  await expect(page.locator("[data-ask-custom]")).toBeChecked();
+  await expect(page.locator("[data-ask-text]")).toHaveValue("");
+  await page.locator("[data-ask-custom]").uncheck();
+
+  // bug1：先勾选 A，再在自定义框输入 —— A 的勾选必须保留，且自定义行自动勾上
   await page.locator('[data-ask-option="0"]').check();
   await page.locator("[data-ask-text]").fill("其他");
   await expect(page.locator('[data-ask-option="0"]')).toBeChecked();
+  await expect(page.locator("[data-ask-custom]")).toBeChecked();
+
+  // bug3：再点第二个选项，自定义行的勾选态与文本都不能被清掉
+  await page.locator('[data-ask-option="1"]').check();
+  await expect(page.locator("[data-ask-custom]")).toBeChecked();
+  await expect(page.locator("[data-ask-text]")).toHaveValue("其他");
+
+  // bug2：取消自定义行的勾选 —— 文本框内容必须保留
+  await page.locator("[data-ask-custom]").uncheck();
+  await expect(page.locator("[data-ask-text]")).toHaveValue("其他");
+  await expect(page.locator('[data-ask-option="0"]')).toBeChecked();
+
+  // 重新勾上自定义行后提交：文本作为额外 selected 项
+  await page.locator("[data-ask-custom]").check();
   await page.locator("[data-ask-submit]").click();
   await expect.poll(() => web.actions.length).toBe(1);
   expect(web.actions[0].value.draft[0]).toMatchObject({
     kind: "multi",
-    options: [0],
+    options: [0, 1],
     custom: true,
     text: "其他",
   });
@@ -282,6 +310,61 @@ test("questionnaire preserves multi selections with custom text and submits plai
   expect(
     await page.evaluate(() => sessionStorage.getItem("ask-user:ask-one")),
   ).toBeNull();
+  expect(errors).toEqual([]);
+});
+
+test("clearing every checkbox returns the multi question to unanswered", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    requests: [
+      {
+        id: "ask-clear",
+        sessionId: "session-browser",
+        packageId: "@juicesharp/rpiv-ask-user-question",
+        kind: "ask_user_question",
+        questions: [
+          {
+            header: "功能",
+            question: "需要哪些功能？",
+            multiSelect: true,
+            options: [
+              { label: "A", description: "甲" },
+              { label: "B", description: "乙" },
+            ],
+          },
+          {
+            header: "补充",
+            question: "还有什么？",
+            options: [
+              { label: "C", description: "丙" },
+              { label: "D", description: "丁" },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const errors = await open(page, web);
+  await page.locator('[data-ask-option="0"]').check();
+  await expect(page.locator('[data-ask-tab="0"]')).toContainText("✓");
+  await page.locator('[data-ask-option="0"]').uncheck();
+  // 取消最后一个勾选 = 回到未答（宿主会删除该答案）， ✓ 标记随之消失
+  await expect(page.locator('[data-ask-tab="0"]')).not.toContainText("✓");
+  await page.locator('[data-ask-option="1"]').check();
+  await page.locator('[data-ask-tab="1"]').click();
+  await page.locator("[data-ask-text]").fill("自定义补充");
+  await page.getByRole("button", { name: "核对与提交" }).click();
+  await expect(page.locator(".ask-review").first()).toContainText("B");
+  await expect(page.locator(".ask-review").nth(1)).toContainText("自定义补充");
+  await page.locator("[data-ask-submit]").click();
+  await expect.poll(() => web.actions.length).toBe(1);
+  expect(web.actions[0].value.draft).toMatchObject([
+    { kind: "multi", options: [1] },
+    // 第二题是单选，自由回答提交为 kind:"custom"
+    { kind: "custom", text: "自定义补充" },
+  ]);
   expect(errors).toEqual([]);
 });
 
@@ -359,6 +442,265 @@ test("generic request shows explanation and can cancel without an undefined prot
     id: "confirm-one",
     cancel: true,
   });
+});
+
+test("single-select questionnaire submits its free-text answer as a custom answer", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    requests: [
+      {
+        id: "ask-single-custom",
+        sessionId: "session-browser",
+        packageId: "@juicesharp/rpiv-ask-user-question",
+        kind: "ask_user_question",
+        questions: [
+          {
+            header: "单选",
+            question: "选哪个？",
+            options: [
+              { label: "A", description: "甲" },
+              { label: "B", description: "乙" },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const errors = await open(page, web);
+  // 在自由回答框里输入：应选中自定义选项
+  await page.locator("[data-ask-text]").fill("我自己输入的回答");
+  await expect(page.locator("[data-ask-custom]")).toBeChecked();
+  await expect(page.locator('[data-ask-option="0"]')).not.toBeChecked();
+  await page.locator("[data-ask-submit]").click();
+  await expect.poll(() => web.actions.length).toBe(1);
+  // 单选必须提交为 kind:"custom"（写成 multi 会被后端按多选校验而报错）
+  expect(web.actions[0].value.draft[0]).toMatchObject({
+    kind: "custom",
+    text: "我自己输入的回答",
+  });
+  expect(errors).toEqual([]);
+});
+
+test("single-select switches between picking an option and typing a free-text answer", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    requests: [
+      {
+        id: "ask-single-switch",
+        sessionId: "session-browser",
+        packageId: "@juicesharp/rpiv-ask-user-question",
+        kind: "ask_user_question",
+        questions: [
+          {
+            header: "单选",
+            question: "选哪个？",
+            options: [
+              { label: "A", description: "甲" },
+              { label: "B", description: "乙" },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const errors = await open(page, web);
+  // 1. 选普通选项：自定义行取消选中
+  await page.locator('[data-ask-option="0"]').check();
+  await expect(page.locator('[data-ask-option="0"]')).toBeChecked();
+  await expect(page.locator("[data-ask-custom]")).not.toBeChecked();
+
+  // 2. 转入自由回答：普通选项被清掉（单选语义）
+  await page.locator("[data-ask-text]").fill("我的回答");
+  await expect(page.locator("[data-ask-custom]")).toBeChecked();
+  await expect(page.locator('[data-ask-option="0"]')).not.toBeChecked();
+
+  // 3. 再切回普通选项：自由回答取消选中，且单选 kind 回到 option
+  await page.locator('[data-ask-option="1"]').check();
+  await expect(page.locator('[data-ask-option="1"]')).toBeChecked();
+  await expect(page.locator("[data-ask-custom]")).not.toBeChecked();
+  await page.locator("[data-ask-submit]").click();
+  await expect.poll(() => web.actions.length).toBe(1);
+  expect(web.actions[0].value.draft[0]).toMatchObject({
+    kind: "option",
+    option: 1,
+  });
+  expect(errors).toEqual([]);
+});
+
+test("single-select preview keeps the option's line structure", async ({ page, web }) => {
+  // 契约：preview 是 Markdown，但多行文本必须按行渲染，且行首缩进保持；
+  // 默认 Markdown 会折叠单换行、CSS 会折叠连续空格，ASCII 布局会被压平。
+  const preview = [
+    "详细模式（并排预览）",
+    "",
+    "  选项区        │  预览区",
+    "  ─────────────┼───────────",
+    "  ● A 推荐方案 │  ┌─ 渲染效果 ─┐",
+    "    改动最小   │  │ 代码/输出 │",
+  ].join("\n");
+  web.setSnapshot({
+    requests: [
+      {
+        id: "ask-preview-lines",
+        sessionId: "session-browser",
+        packageId: "@juicesharp/rpiv-ask-user-question",
+        kind: "ask_user_question",
+        questions: [
+          {
+            header: "布局",
+            question: "选哪种？",
+            options: [
+              { label: "A", description: "甲", preview },
+              {
+                label: "B",
+                description: "乙",
+                // 列表/引用等非段落块也要保留空白，不能只盖住 <p>
+                preview: "- 第一项   带   空格\n\n> 引用里  也有   空格\n\n正常段落，恢复 单个空格。",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const errors = await open(page, web);
+  await page.locator(".ask-preview summary").first().click();
+  const body = page.locator(".ask-preview").first().locator(".body");
+  await expect(body).toContainText("选项区");
+
+  const rendered = await body.evaluate((node) => {
+    const lines = node.innerText.split("\n");
+    return {
+      lines,
+      blanks: lines.filter((l) => l.trim() === "").length,
+      whiteSpace: getComputedStyle(node.querySelector("p")).whiteSpace,
+    };
+  });
+  // 硬换行让每一行都在新行上（空行把内容分成两个段落，后一段 4 行 → 3 个 <br>）
+  expect(await body.locator("br").count()).toBeGreaterThanOrEqual(3);
+  // 行首缩进与列对齐必须保留（否则 ASCII 布局会被压平）
+  expect(rendered.whiteSpace).toBe("pre-wrap");
+  expect(rendered.lines.some((l) => l.startsWith("  选项区"))).toBe(true);
+  expect(rendered.lines.some((l) => l.includes("● A 推荐方案 │  ┌─ 渲染效果 ─┐"))).toBe(true);
+  // 预览内容包在面板框里（与代码块同一套视觉语言）
+  const box = await body.evaluate((node) => {
+    const cs = getComputedStyle(node);
+    return {
+      borderTopWidth: cs.borderTopWidth,
+      borderTopStyle: cs.borderTopStyle,
+      background: cs.backgroundColor,
+      paddingTop: cs.paddingTop,
+      radius: cs.borderTopLeftRadius,
+    };
+  });
+  expect(box.borderTopStyle).toBe("solid");
+  expect(parseFloat(box.borderTopWidth)).toBeGreaterThan(0);
+  expect(box.background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(parseFloat(box.paddingTop)).toBeGreaterThan(0);
+  expect(parseFloat(box.radius)).toBeGreaterThan(0);
+  // 不能因为保留空白而多出空行（原文只有 1 个空行）
+  expect(rendered.blanks).toBe(1);
+
+  // 叶子块保留空白；容器（引用/松散列表项）不能保留，否则内部换行会变成空行
+  await page.locator(".ask-preview summary").nth(1).click();
+  const listBody = page.locator(".ask-preview").nth(1).locator(".body");
+  await expect(listBody).toContainText("第一项");
+  const listWhitespace = await listBody.evaluate((node) => ({
+    li: getComputedStyle(node.querySelector("li")).whiteSpace,
+    quote: getComputedStyle(node.querySelector("blockquote")).whiteSpace,
+    quoteParagraph: getComputedStyle(node.querySelector("blockquote p")).whiteSpace,
+    quoteBlanks: node
+      .querySelector("blockquote")
+      .innerText.split("\n")
+      .filter((l) => l.trim() === "").length,
+    // 容器已提供内边距，内部段落不能再叠外边距（否则引用被撑高）
+    quoteInnerMargin: getComputedStyle(node.querySelector("blockquote p")).marginTop,
+    quoteInnerMarginBottom: getComputedStyle(node.querySelector("blockquote p")).marginBottom,
+    // 预览内部块间距统一为项目 8px 节奏（浏览器默认 p 是 1em = 12px）
+    paragraphMargin: getComputedStyle(node.querySelector(":scope > p")).marginTop,
+    liText: node.querySelector("li").innerText,
+  }));
+  expect(listWhitespace.li).toBe("pre-wrap");
+  // 引用是容器：自身 normal（否则内部换行会撑出空行），内容段落仍 pre-wrap
+  expect(listWhitespace.quote).toBe("normal");
+  expect(listWhitespace.quoteParagraph).toBe("pre-wrap");
+  // 容器里不能出现空行（之前的 bug：引用被撑到 6 个空行）
+  expect(listWhitespace.quoteBlanks).toBe(0);
+  // 引用不能被内部段落的外边距撑高
+  expect(listWhitespace.quoteInnerMargin).toBe("0px");
+  expect(listWhitespace.quoteInnerMarginBottom).toBe("0px");
+  expect(listWhitespace.paragraphMargin).toBe("8px");
+  expect(listWhitespace.liText).toContain("第一项   带   空格");
+  expect(errors).toEqual([]);
+});
+
+test("switching tabs keeps every question's draft intact", async ({ page, web }) => {
+  web.setSnapshot({
+    requests: [
+      {
+        id: "ask-tabs",
+        sessionId: "session-browser",
+        packageId: "@juicesharp/rpiv-ask-user-question",
+        kind: "ask_user_question",
+        questions: [
+          {
+            header: "多选",
+            question: "需要哪些功能？",
+            multiSelect: true,
+            options: [
+              { label: "A", description: "甲" },
+              { label: "B", description: "乙" },
+            ],
+          },
+          {
+            header: "补充",
+            question: "还有什么？",
+            options: [
+              { label: "C", description: "丙" },
+              { label: "D", description: "丁" },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const errors = await open(page, web);
+
+  // 第 1 题：勾选 + 自由文本都填上
+  await page.locator('[data-ask-option="0"]').check();
+  await page.locator("[data-ask-text]").fill("第一题的自由回答");
+  await expect(page.locator('[data-ask-tab="0"]')).toContainText("✓");
+
+  // 切到第 2 题、作答、再切回来
+  await page.locator('[data-ask-tab="1"]').click();
+  await expect(page.locator(".ask-title")).toHaveText("补充");
+  await page.locator('[data-ask-option="1"]').check();
+  await expect(page.locator('[data-ask-tab="1"]')).toContainText("✓");
+  await page.locator('[data-ask-tab="0"]').click();
+
+  // 第 1 题的全部输入必须原样保留（勾选、自定义勾选、文本）
+  await expect(page.locator(".ask-title")).toHaveText("多选");
+  await expect(page.locator('[data-ask-option="0"]')).toBeChecked();
+  await expect(page.locator("[data-ask-custom]")).toBeChecked();
+  await expect(page.locator("[data-ask-text]")).toHaveValue("第一题的自由回答");
+
+  // 核对页应同时展示两题的答案
+  await page.getByRole("button", { name: "核对与提交" }).click();
+  await expect(page.locator(".ask-review").first()).toContainText("A");
+  await expect(page.locator(".ask-review").first()).toContainText("第一题的自由回答");
+  await expect(page.locator(".ask-review").nth(1)).toContainText("D");
+
+  await page.locator("[data-ask-submit]").click();
+  await expect.poll(() => web.actions.length).toBe(1);
+  expect(web.actions[0].value.draft).toMatchObject([
+    { kind: "multi", options: [0], custom: true, text: "第一题的自由回答" },
+    { kind: "option", option: 1 },
+  ]);
+  expect(errors).toEqual([]);
 });
 
 test("custom terminal mirrors text, sends keys to its request and disposes when removed", async ({
@@ -506,7 +848,35 @@ test("tool input, progress and final result share one card with final timing", a
   expect(errors).toEqual([]);
 });
 
-test("skill reads render as a purple skill card with the skill name", async ({
+test("generic tools use JSON input and unframed Markdown output without nested vertical scrolling", async ({ page, web }) => {
+  web.setSnapshot({
+    messages: [
+      ...fixture().messages,
+      { id: "generic-call", role: "assistant", content: [{
+        type: "toolCall", id: "generic-one", name: "ctx_execute",
+        arguments: { code: "const answer = 42" },
+      }] },
+      { id: "generic-result", role: "toolResult", toolCallId: "generic-one", toolName: "ctx_execute",
+        content: [{ type: "text", text: "## Result\n\n```js\nconst answer = 42;\n```" }] },
+    ],
+  });
+  await open(page, web);
+  const tool = page.locator(".tool-block").filter({ hasText: /^ctx_execute/ });
+  await tool.evaluate((node) => { node.closest(".turn-group").open = true; node.open = true; });
+  await expect(tool.locator(".tool-panel")).toHaveCount(0);
+  await expect(tool.locator(".tool-output-frame")).toHaveCount(0);
+  await expect(tool.locator(".tool-io-section").first().locator(".code-header")).toContainText("json");
+  await expect(tool.locator(".tool-output-markdown h2")).toHaveText("Result");
+  const style = await tool.locator(".tool-output-markdown .code-scroll").evaluate((node) => ({
+    maxHeight: getComputedStyle(node).maxHeight,
+    hasVerticalOverflow: node.scrollHeight > node.clientHeight,
+    background: getComputedStyle(node).backgroundColor,
+  }));
+  expect(style.maxHeight).toBe("none");
+  expect(style.hasVerticalOverflow).toBe(false);
+});
+
+test("skill reads render as a normal grey card with the skill name", async ({
   page,
   web,
 }) => {
@@ -540,26 +910,141 @@ test("skill reads render as a purple skill card with the skill name", async ({
   const skill = page.locator(".tool-block.tool-skill");
   await expect(skill).toHaveCount(1);
   await expect(skill.locator(".tool-title strong")).toHaveText("skill");
-  await expect(skill.locator(".tool-title span")).toHaveText("pi-vue-nobuild");
+  await expect(skill.locator(".disclosure-separator")).toHaveText("·");
+  await expect(skill.locator(".tool-title > span:last-child")).toHaveText("pi-vue-nobuild");
+  await skill.evaluate((node) => {
+    const group = node.closest(".turn-group");
+    if (group) group.open = true;
+  });
+  // 图标/三角有 120ms 过渡，读取计算样式前等它稳定
+  await page.waitForTimeout(250);
+  await skill.locator(":scope > summary").hover();
+  // hover 会触发 120ms 过渡，用带重试的断言等它结束，避免读到中间值
+  await expect(skill.locator(".disclosure-type-icon")).toHaveCSS("opacity", "0");
+  await expect(skill.locator(".disclosure-caret")).toHaveCSS("opacity", "1");
+  await skill.locator(":scope > summary").click();
+  // 展开时只有「思考」块会隐藏分隔点，工具卡保留它
+  await expect(skill.locator(".disclosure-separator")).toBeVisible();
+  const alignment = await skill.locator(":scope > summary").evaluate((summary) => {
+    const icon = summary.querySelector(".disclosure-icon").getBoundingClientRect();
+    const title = summary.querySelector(".tool-title").getBoundingClientRect();
+    return Math.abs(icon.top + icon.height / 2 - (title.top + title.height / 2));
+  });
+  expect(alignment).toBeLessThanOrEqual(1);
 
-  // 整卡紫色：卡片配色变量与标题颜色都必须和普通 read 不同，且为紫色系（蓝 > 绿）。
+  // 统一状态色：技能卡不再单独着色，与普通 read 同为「正常」灰色。
   const colors = await page.evaluate(() => {
     const read = (selector) => {
       const card = document.querySelector(selector);
       return {
-        state: getComputedStyle(card).getPropertyValue("--tool-state").trim(),
         title: getComputedStyle(card.querySelector("summary")).color,
+        icon: getComputedStyle(card.querySelector(".disclosure-icon")).color,
       };
     };
+    const probe = document.createElement("span");
+    probe.style.color = getComputedStyle(document.documentElement).getPropertyValue("--muted");
+    document.body.appendChild(probe);
+    const muted = getComputedStyle(probe).color;
+    probe.remove();
     return {
+      muted,
       skill: read(".tool-block.tool-skill"),
       plain: read(".tool-block:not(.tool-skill)"),
     };
   });
-  expect(colors.skill.state).not.toBe(colors.plain.state);
-  expect(colors.skill.title).not.toBe(colors.plain.title);
-  const rgb = colors.skill.title.match(/\d+/g).map(Number);
-  expect(rgb[2]).toBeGreaterThan(rgb[1]);
+  expect(colors.skill.icon).toBe(colors.plain.icon);
+  expect(colors.skill.title).toBe(colors.plain.title);
+  expect(colors.skill.icon).toBe(colors.muted);
+  expect(colors.skill.title).toBe(colors.muted);
+  expect(errors).toEqual([]);
+});
+
+test("collapsible blocks keep grey normally and turn the whole summary red on error", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    messages: [
+      ...fixture().messages,
+      {
+        id: "state-call",
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call-ok", name: "bash", arguments: { command: "ls" } },
+          { type: "toolCall", id: "call-bad", name: "read", arguments: { path: "missing.md" } },
+        ],
+      },
+      {
+        id: "state-ok",
+        role: "toolResult",
+        toolCallId: "call-ok",
+        toolName: "bash",
+        content: [{ type: "text", text: "ok" }],
+        isError: false,
+      },
+      {
+        id: "state-bad",
+        role: "toolResult",
+        toolCallId: "call-bad",
+        toolName: "read",
+        content: [{ type: "text", text: "ENOENT" }],
+        isError: true,
+      },
+      { id: "notice-info", role: "notification", level: "info", content: "普通通知内容" },
+      { id: "notice-warn", role: "notification", level: "warning", content: "警告通知内容" },
+      { id: "notice-error", role: "notification", level: "error", content: "错误通知内容" },
+    ],
+    tools: [],
+  });
+  const errors = await open(page, web);
+  const palette = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const probe = document.createElement("span");
+    document.body.appendChild(probe);
+    const read = (name) => {
+      probe.style.color = root.getPropertyValue(name);
+      return getComputedStyle(probe).color;
+    };
+    const out = {
+      muted: read("--muted"),
+      preview: read("--summary-preview"),
+      failure: read("--tool-failure"),
+      running: read("--tool-running"),
+    };
+    probe.remove();
+    return out;
+  });
+  const summaryParts = async (selector) => {
+    const summary = page.locator(selector).locator(":scope > summary");
+    await expect(summary).toHaveCount(1);
+    return summary.evaluate((node) => ({
+      all: [node, ...node.querySelectorAll("*")].map((n) => getComputedStyle(n).color),
+      title: [node.querySelector(".disclosure-icon"), node.querySelector("strong")]
+        .filter(Boolean)
+        .map((n) => getComputedStyle(n).color),
+      preview: [...node.querySelectorAll(".disclosure-preview, .tool-title > span:not(.disclosure-separator)")]
+        .map((n) => getComputedStyle(n).color),
+    }));
+  };
+  const expectUniform = (parts, expected) => {
+    expect(parts.all.length).toBeGreaterThan(3);
+    parts.all.forEach((color) => expect(color).toBe(expected));
+  };
+  const expectParts = (parts, title, preview) => {
+    expect(parts.all.length).toBeGreaterThan(3);
+    parts.title.forEach((color) => expect(color).toBe(title));
+    expect(parts.preview.length).toBeGreaterThan(0);
+    parts.preview.forEach((color) => expect(color).toBe(preview));
+  };
+
+  // 正常：图标与标题为普通灰，单行摘要用更浅的 --summary-preview
+  expectParts(await summaryParts(".tool-block.tool-success"), palette.muted, palette.preview);
+  expectParts(await summaryParts('[data-notification="info"]'), palette.muted, palette.preview);
+  // 警告 = 橙色（通知 warning），整行同色
+  expectUniform(await summaryParts('[data-notification="warning"]'), palette.running);
+  // 报错 = 红色，整行（图标、标题、摘要、耗时）统一标红
+  expectUniform(await summaryParts(".tool-block.tool-failure"), palette.failure);
+  expectUniform(await summaryParts('[data-notification="error"]'), palette.failure);
   expect(errors).toEqual([]);
 });
 
@@ -1496,7 +1981,7 @@ test.describe("touch device", () => {
   });
 });
 
-test("long sessions paint the newest turns first and backfill the rest in the background", async ({
+test("long sessions paint the newest turns first and load one older page near the top", async ({
   page,
   web,
 }) => {
@@ -1551,7 +2036,11 @@ test("long sessions paint the newest turns first and backfill the rest in the ba
       server.publish({ historyComplete: true });
       return { queued: true, count: 0 };
     }
-    const { messages, start } = olderHistory(turnMessages, index, HISTORY_TURNS);
+    const { messages, start } = olderHistory(
+      turnMessages,
+      index,
+      HISTORY_PAGE_TURNS,
+    );
     server.publish({ prependMessages: messages, historyComplete: start === 0 });
     return { queued: true, count: messages.length };
   });
@@ -1560,26 +2049,39 @@ test("long sessions paint the newest turns first and backfill the rest in the ba
   page.on("pageerror", (error) => failures.push(error.message));
   await page.goto(new URL(`/#${token}`, web.server.url).toString());
   await expect(page.locator("#message-history")).toContainText(`第 ${turns - 1} 轮结论`);
+  const initialAssets = await page.evaluate(() =>
+    performance.getEntriesByType("resource").map((entry) => entry.name),
+  );
+  expect(initialAssets.some((url) => /\/xterm\.(?:js|css)$/.test(url))).toBe(false);
+  expect(initialAssets.some((url) => /\/views\/(?:Context|Settings)View\.js$/.test(url))).toBe(false);
 
   // 首屏只有最近 10 轮，且已加载的中间过程全部折叠
   expect(await page.locator(".turn-group").count()).toBe(HISTORY_TURNS);
   expect(await page.locator(".turn-group[open]").count()).toBe(0);
   await expect(page.locator("#message-history")).not.toContainText("第 0 轮结论");
-  // 游标就是当前最老一条
+  // 停在底部时不应在后台连续灌入历史；滚到顶部才请求一页。
+  await page.waitForTimeout(300);
+  expect(web.actions.filter((action) => action.type === "more_history")).toHaveLength(0);
+  await page.locator("#scroll").evaluate((node) => {
+    node.scrollTop = 0;
+    node.dispatchEvent(new Event("scroll"));
+  });
   await expect
     .poll(() => web.actions.filter((action) => action.type === "more_history").length)
-    .toBeGreaterThan(0);
+    .toBe(1);
   expect(
     web.actions.find((action) => action.type === "more_history").cursor,
   ).toBe("lazy-u15");
 
-  // 放行后台补页：更早的轮次逐页插入，已渲染内容不受影响
+  // 放行单页补载：保留当前视口，不继续自动请求其余页面。
   released = true;
   release();
-  await expect(page.locator("#message-history")).toContainText("第 0 轮结论", {
-    timeout: 15_000,
-  });
-  expect(await page.locator(".turn-group").count()).toBe(turns);
+  await expect(page.locator("#message-history")).toContainText("第 10 轮结论");
+  expect(await page.locator(".turn-group").count()).toBe(
+    HISTORY_TURNS + HISTORY_PAGE_TURNS,
+  );
+  await page.waitForTimeout(300);
+  expect(web.actions.filter((action) => action.type === "more_history")).toHaveLength(1);
   expect(await page.locator(".turn-group[open]").count()).toBe(0);
   await expect(page.locator("#message-history")).toContainText("第 24 轮结论");
   expect(failures).toEqual([]);
@@ -1652,7 +2154,7 @@ test("system tools render dedicated write content and edit diffs", async ({
   const card = (name) =>
     page
       .locator(".tool-block")
-      .filter({ has: page.locator(`.tool-title strong:text-is("${name}")`) })
+      .filter({ hasText: new RegExp(`^${name}`) })
       .first();
 
   // write：标题带路径，正文是推断出语言的高亮内容，原始入参收进二级折叠
@@ -1770,13 +2272,37 @@ test("read and bash results render as code and terminal output", async ({
         toolName: "bash",
         content: [{ type: "text", text: "# not a heading\n* not a bullet" }],
       },
+      {
+        id: "rb-a3",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-grep",
+            name: "grep",
+            arguments: { pattern: "TODO", path: "src", glob: "*.ts" },
+          },
+        ],
+      },
+      {
+        id: "rb-r3",
+        role: "toolResult",
+        toolCallId: "call-grep",
+        toolName: "grep",
+        content: [
+          {
+            type: "text",
+            text: "src/a_b.ts:12: // TODO fix *this*\nsrc/c.ts:3: // TODO",
+          },
+        ],
+      },
     ],
   });
   const errors = await open(page, web);
   const card = (name) =>
     page
       .locator(".tool-block")
-      .filter({ has: page.locator(`.tool-title strong:text-is("${name}")`) })
+      .filter({ hasText: new RegExp(`^${name}`) })
       .first();
 
   // read：INPUT 是可读参数 + 原始 Input 折叠；OUTPUT 按路径语言高亮、行号从 offset 开始
@@ -1818,20 +2344,29 @@ test("read and bash results render as code and terminal output", async ({
 
   // bash：INPUT 是 bash 代码块（命令），OUTPUT 原样展示终端文本（markdown 不会改写 # / *）
   const bash = card("bash");
-  const bashInput = bash.locator(".tool-body > .tool-io-section").first();
-  await expect(bashInput.locator(".tool-io-label")).toHaveText("Input");
-  await expect(bashInput.locator(".code-header").first()).toContainText("bash");
-  await expect(bashInput.locator(".code-source code").first()).toHaveText(
-    "printf '# not a heading\\n* not a bullet'",
-  );
-  await expect(bashInput.locator("details.tool-raw-input .code-header")).toContainText(
-    "json",
-  );
-  await expect(bash.locator(".tool-output-frame pre.shell-output")).toHaveText(
+  // 三张工具卡（read/bash/grep）都在，并且卡片自带复制按钮（图标、仅 hover 可见）
+  expect(await page.locator(".tool-block").count()).toBeGreaterThanOrEqual(3);
+  expect(await page.locator(".tool-block .code-copy").count()).toBeGreaterThan(0);
+  await expect(bash.locator(".tool-output-frame pre.plain-output")).toHaveText(
     "# not a heading\n* not a bullet",
   );
   await expect(bash.locator(".tool-output-frame h1")).toHaveCount(0);
   await expect(bash.locator(".tool-output-frame ul")).toHaveCount(0);
+
+  // grep：标题取 pattern；INPUT 是可读参数；结果逐行原文（路径里的 _、* 不被 markdown 改写）
+  const grep = card("grep");
+  await expect(grep.locator(".tool-title")).toContainText("TODO");
+  const grepInput = grep.locator(".tool-body > .tool-io-section").first();
+  await expect(grepInput.locator(".tool-params dt")).toHaveText([
+    "模式",
+    "路径",
+    "文件过滤",
+  ]);
+  await expect(grepInput.locator(".tool-params dd").first()).toHaveText("TODO");
+  await expect(grep.locator(".tool-output-frame pre.plain-output")).toHaveText(
+    "src/a_b.ts:12: // TODO fix *this*\nsrc/c.ts:3: // TODO",
+  );
+  await expect(grep.locator(".tool-output-frame em")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -1871,7 +2406,7 @@ test("edit falls back to argument hunks without line numbers until the result ar
   await open(page, web);
   const card = page
     .locator(".tool-block")
-    .filter({ has: page.locator('.tool-title strong:text-is("edit")') })
+    .filter({ hasText: /^edit/ })
     .first();
   await expect(card.locator(".diff-removed .diff-text")).toHaveText(
     "const before = 1;",

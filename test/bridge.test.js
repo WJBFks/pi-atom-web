@@ -96,7 +96,7 @@ test("reload mirrors notifications emitted while the replacement session starts"
   }
 });
 
-test("multi answer preserves ordinary selections and appends custom text", () => {
+test("multi answers carry selected labels while free text stays a custom answer", () => {
   const questions = [
     {
       question: "选择功能",
@@ -105,13 +105,12 @@ test("multi answer preserves ordinary selections and appends custom text", () =>
       options: [{ label: "A" }, { label: "B" }],
     },
   ];
+  // selected 按选项顺序（不是点击顺序）汇总，与宿主 state-reducer 一致
   assert.deepEqual(
     buildAskUserResult(questions, [
       {
         kind: "multi",
         options: [1, 0],
-        custom: true,
-        text: "C",
         notes: "备注",
       },
     ], false, "全局备注"),
@@ -122,7 +121,7 @@ test("multi answer preserves ordinary selections and appends custom text", () =>
           question: "选择功能",
           kind: "multi",
           answer: null,
-          selected: ["A", "B", "C"],
+          selected: ["A", "B"],
           notes: "备注",
         },
       ],
@@ -130,9 +129,90 @@ test("multi answer preserves ordinary selections and appends custom text", () =>
       globalNote: "全局备注",
     },
   );
+  // 自由回答是独立的 custom 答案，不再并进 selected
+  assert.deepEqual(
+    buildAskUserResult(questions, [{ kind: "custom", text: "C" }]).answers,
+    [{ questionIndex: 0, question: "选择功能", kind: "custom", answer: "C" }],
+  );
   assert.throws(
     () => buildAskUserResult(questions, [{ kind: "multi", options: [0, 0] }]),
     /多选/,
+  );
+  // 单选不接受多选形状，多选不接受单选形状
+  assert.throws(
+    () => buildAskUserResult(questions, [{ kind: "option", option: 0 }]),
+    /单选/,
+  );
+  const single = [{ question: "单选", header: "单选", options: [{ label: "A" }, { label: "B" }] }];
+  assert.throws(
+    () => buildAskUserResult(single, [{ kind: "multi", options: [0] }]),
+    /多选/,
+  );
+});
+
+test("clearing every multi checkbox contributes no answer, matching the host", () => {
+  const questions = [
+    {
+      question: "选择功能",
+      header: "功能",
+      multiSelect: true,
+      options: [{ label: "A" }, { label: "B" }],
+    },
+  ];
+  // 宿主对 selected 为空的答案是直接删除（视为未答），而不是空多选答案
+  assert.deepEqual(buildAskUserResult(questions, [{ kind: "multi", options: [] }]).answers, []);
+  assert.deepEqual(buildAskUserResult(questions, [{ kind: "unanswered" }]).answers, []);
+});
+
+test("package compatibility keeps claiming every consecutive ask in one session", async () => {
+  // 回归：registry 曾把历史 prompt 事件在每次加载/replay 时重复注入适配器，
+  // 使 ready 出现多个候选而被歧义保护拒绝，第二个问卷静默退回通用终端。
+  const listeners = new Map();
+  const registry = createPackageCompatibilityRegistry({
+    events: { on: (name, handler) => listeners.set(name, handler) },
+  });
+  const questions = label => [{
+    header: label,
+    question: `问题 ${label}`,
+    options: [
+      { label: "A", description: "甲" },
+      { label: "B", description: "乙" },
+    ],
+  }];
+  const eventFor = qs => qs.map(q => ({
+    ...q,
+    multiSelect: false,
+    options: q.options.map(o => ({ ...o, hasPreview: false })),
+  }));
+  const factory = () => {
+    const Session = class {};
+    const sessionRef = { current: null };
+    return function QuestionnaireSessionFactory(tui, theme, keybindings, done) {
+      const session = new Session({ tui, theme, keybindings, done });
+      sessionRef.current = session;
+      return session.component;
+    };
+  };
+
+  for (const [toolCallId, label] of [["ask-1", "一"], ["ask-2", "二"], ["ask-3", "三"]]) {
+    const qs = questions(label);
+    registry.start({ toolName: "ask_user_question", toolCallId, args: { questions: qs } });
+    listeners.get("rpiv:ask-user:prompt")({ questions: eventFor(qs) });
+    const claim = await registry.takeCustom(factory());
+    assert.equal(claim?.toolCallId, toolCallId, `第 ${label} 次提问应被认领`);
+    registry.end(toolCallId);
+  }
+
+  // 事件先于适配器加载到达时，缓冲的候选仍需在激活后补投。
+  const lateQuestions = questions("迟到");
+  const late = createPackageCompatibilityRegistry({
+    events: { on: (name, handler) => listeners.set(`late:${name}`, handler) },
+  });
+  listeners.get("late:rpiv:ask-user:prompt")({ questions: eventFor(lateQuestions) });
+  late.start({ toolName: "ask_user_question", toolCallId: "ask-late", args: { questions: lateQuestions } });
+  assert.equal(
+    (await late.takeCustom(factory()))?.toolCallId,
+    "ask-late",
   );
 });
 
@@ -158,7 +238,7 @@ test("ask adapter does not claim unrelated or ambiguous custom UI factories", ()
     {
       header: "测试",
       question: "选哪项",
-      options: [{ label: "A", description: "一个" }],
+      options: [{ label: "A", description: "一个" }, { label: "B", description: "两个" }],
     },
   ];
   adapter.start({
@@ -185,6 +265,46 @@ test("ask adapter does not claim unrelated or ambiguous custom UI factories", ()
     adapter.take(() => "QuestionnaireSession"),
     undefined,
   );
+});
+
+test("ask adapter ignores malformed questionnaires and keeps the generic fallback", () => {
+  const adapter = createAskUserAdapter();
+  const question = {
+    header: "选择",
+    question: "选择？",
+    options: [
+      { label: "A", description: "一个" },
+      { label: "B", description: "两个" },
+    ],
+  };
+  const malformed = [
+    [],
+    Array.from({ length: 5 }, () => question),
+    [{ ...question, header: "x".repeat(17) }],
+    [{ ...question, options: [{ label: "A", description: "一个" }] }],
+    [{ ...question, options: [{ label: "", description: "空标签" }, { label: "B", description: "两个" }] }],
+    "questions",
+  ];
+  for (const questions of malformed) {
+    adapter.clear();
+    adapter.start({ toolName: "ask_user_question", toolCallId: "bad", args: { questions } });
+    adapter.prompt({ questions });
+    assert.equal(
+      adapter.take(() => "QuestionnaireSession"),
+      undefined,
+      `不应认领畸形问卷：${JSON.stringify(questions).slice(0, 60)}`,
+    );
+  }
+  // 合法问卷仍然正常认领
+  adapter.clear();
+  adapter.start({ toolName: "ask_user_question", toolCallId: "ok", args: { questions: [question] } });
+  adapter.prompt({
+    questions: [{
+      ...question,
+      options: question.options.map(option => ({ ...option, hasPreview: false })),
+    }],
+  });
+  assert.equal(adapter.take(() => "QuestionnaireSession")?.toolCallId, "ok");
 });
 
 test("ask adapter recognizes the rpiv 2.9 QuestionnaireSession factory shape", () => {
@@ -572,4 +692,42 @@ test("real bridge updates statistics on same-session branch navigation and rejec
     await events.get("session_shutdown")();
     delete globalThis[Symbol.for("pi-atom-web.reload-handoff")];
   }
+});
+
+test("multi checkboxes and free text survive each other's edits", () => {
+  // 回归用户报告的 bug：选中自定义输入框会清空已勾选的复选框，
+  // 再次勾选复选框又会清空自定义输入并取消它的勾选态。
+  const questions = [
+    {
+      header: "多选",
+      question: "要点哪些？",
+      multiSelect: true,
+      options: [{ label: "A" }, { label: "B" }, { label: "C" }],
+    },
+  ];
+  // UI 三步操作后的草稿：勾选 A、输入文本、再勾选 C
+  const draft = {
+    kind: "multi",
+    option: 0,
+    options: [0, 2],
+    custom: true,
+    text: "自定义",
+    notes: "",
+  };
+  const result = buildAskUserResult(questions, [draft]);
+  assert.deepEqual(result.answers, [
+    {
+      questionIndex: 0,
+      question: "要点哪些？",
+      kind: "multi",
+      answer: null,
+      // 自由文本作为额外 selected 项（宿主 multi 答案只有 selected 数组）
+      selected: ["A", "C", "自定义"],
+    },
+  ]);
+  // 既无勾选也无文本才算未答
+  assert.deepEqual(
+    buildAskUserResult(questions, [{ kind: "multi", options: [], custom: false, text: "" }]).answers,
+    [],
+  );
 });

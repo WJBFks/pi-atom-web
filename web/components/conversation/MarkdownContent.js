@@ -4,10 +4,15 @@ import { writeClipboard } from "../../clipboard.js";
 
 export default defineComponent({
   name: "MarkdownContent",
-  props: { text: { type: String, default: "" }, live: Boolean },
+  props: {
+    text: { type: String, default: "" },
+    live: Boolean,
+    // 保留单个换行为硬换行（GFM）：问卷 preview 等「多行文本必须按行渲染」的场景
+    breaks: Boolean,
+  },
   setup(props) {
     const html = computed(() =>
-      renderMarkdown(props.text, { live: props.live }),
+      renderMarkdown(props.text, { live: props.live, breaks: props.breaks }),
     );
     let resetTimer,
       disposed = false;

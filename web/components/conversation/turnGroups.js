@@ -91,13 +91,16 @@ export function buildTurnGroup(messages) {
 }
 
 // 把扁平的 messages 拆成可直接渲染的条目：单条消息，或一轮的折叠分组 + 它露出的最终输出。
-// 折叠时机：只有「下一个用户输入开始」才折叠上一轮（不再是整轮输出一停就折叠）；
-// keepOpen 因此表示「本分组之后还没有用户输入」。命令、通知、自定义 Entry、分支/上下文
-// 摘要等非用户条目照旧切断分组，但不触发折叠。两个额外开关：nextUserInput 用于浏览器里
-// 已经显示、尚未进入历史的用户消息（乐观消息）；collapseTail 用于「加载时全部折叠」。
+// 折叠时机：
+// - 常规：只有「下一个用户输入开始」才折叠上一轮（命令/通知/自定义 Entry 等非用户条目
+//   照旧切断分组，但不触发折叠），keepOpen 因此表示「本分组之后还没有用户输入」；
+// - 加载（首次快照 / /reload）：collapseLoaded 让已加载的中间过程全部折叠
+//   （会话正在生成时保留正在跑的那一轮）；
+// - nextUserInput：浏览器里已显示、尚未进入历史的乐观用户消息也算「用户输入开始」。
+// - groupMessages 只做纯计算，渲染与折叠状态由组件负责。
 export function groupMessages(
   messages,
-  { nextUserInput = false, collapseTail = false } = {},
+  { nextUserInput = false, collapseLoaded = false, running = false } = {},
 ) {
   const list = messages || [];
   const items = [];
@@ -125,9 +128,11 @@ export function groupMessages(
       run.push(message);
       continue;
     }
-    flush(message.role !== "user");
+    flush(collapseLoaded ? false : message.role !== "user");
     items.push({ kind: "message", message });
   }
-  flush(collapseTail || nextUserInput ? false : true);
+  flush(
+    collapseLoaded ? Boolean(running) : !nextUserInput,
+  );
   return items;
 }

@@ -1,5 +1,6 @@
 import { computed, defineComponent, h, onUnmounted, watch } from "vue";
 import { writeClipboard } from "../../clipboard.js";
+import { icon } from "../../icons.js";
 import { codeBlock } from "../../markdown.js";
 import { useConversationClock } from "../../stores/conversation.js";
 import MarkdownContent from "./MarkdownContent.js";
@@ -105,6 +106,7 @@ export function editHunks(args) {
 export function parseToolDiff(value) {
   return String(value ?? "")
     .split("\n")
+    .filter((line) => line.trim() !== "" && !/^\s*\.\.\.\s*$/.test(line))
     .map((line) => {
       const match = /^([+-\s])(\s*\d*)\s(.*)$/.exec(line);
       if (!match) return { kind: "context", lineNumber: "", content: line };
@@ -121,10 +123,15 @@ export function parseToolDiff(value) {
     });
 }
 
-export function toolTitleArgument(args) {
+// 标题里的关键参数：宿主对 grep/find 用 pattern、对 read/write/edit 用 file_path。
+export function toolTitleArgument(args, tool) {
   if (!args || typeof args !== "object") return "";
+  const name = String(tool || "").toLowerCase();
+  const preferred =
+    name === "grep" || name === "find" ? args.pattern : undefined;
   const value =
     args.command ??
+    preferred ??
     args.file_path ??
     args.path ??
     args.query ??
@@ -189,19 +196,51 @@ export function resultText(result) {
     .join("\n");
 }
 
-// read 的 INPUT 改成逐项可读参数（路径/起始行/行数），原始 JSON 收进「原始 Input」折叠；
+// read/grep/find/ls 的 INPUT 改成逐项可读参数（原始 JSON 收进「原始 Input」折叠）；
 // bash/powershell 的命令改用对应语言的代码块展示（见 toolCommand），其余工具直接展示 JSON。
 export function toolInputRows(name, args) {
-  if (String(name || "").toLowerCase() !== "read") return [];
+  const tool = String(name || "").toLowerCase();
   if (!args || typeof args !== "object") return [];
   const rows = [];
-  const path = toolFilePath(args);
-  if (path) rows.push({ label: "路径", value: path });
-  if (Number.isFinite(Number(args.offset)))
-    rows.push({ label: "起始行", value: String(args.offset) });
-  if (Number.isFinite(Number(args.limit)))
-    rows.push({ label: "行数", value: String(args.limit) });
+  const push = (label, value) => {
+    if (value === undefined || value === null || value === "") return;
+    rows.push({ label, value: String(value) });
+  };
+  if (tool === "read") {
+    push("路径", toolFilePath(args));
+    if (Number.isFinite(Number(args.offset))) push("起始行", args.offset);
+    if (Number.isFinite(Number(args.limit))) push("行数", args.limit);
+    return rows;
+  }
+  if (tool === "grep") {
+    push("模式", args.pattern);
+    push("路径", args.path);
+    push("文件过滤", args.glob);
+    if (args.ignoreCase === true) push("忽略大小写", "是");
+    if (args.literal === true) push("按字面量", "是");
+    if (Number(args.context) > 0) push("上下文行数", args.context);
+    if (Number.isFinite(Number(args.limit))) push("上限", args.limit);
+    return rows;
+  }
+  if (tool === "find") {
+    push("模式", args.pattern);
+    push("路径", args.path);
+    if (Number.isFinite(Number(args.limit))) push("上限", args.limit);
+    return rows;
+  }
+  if (tool === "ls") {
+    push("路径", args.path);
+    if (Number.isFinite(Number(args.limit))) push("上限", args.limit);
+    return rows;
+  }
   return rows;
+}
+
+// 结果是一行一行纯文本（终端输出、文件:行号: 内容、路径列表）的工具：
+// 这些内容不能过 markdown，否则 #、*、_、| 会被改写成标题/列表/表格。
+const PLAIN_OUTPUT_TOOLS = ["bash", "powershell", "grep", "find", "ls"];
+export function isPlainOutputTool(name) {
+  return PLAIN_OUTPUT_TOOLS.includes(String(name || "").toLowerCase());
 }
 
 // bash/powershell 的 INPUT：命令本身就是一个脚本块，按对应语言高亮。
@@ -222,14 +261,20 @@ export function splitToolNotices(value) {
   const text = String(value ?? "");
   const marker = text.lastIndexOf("\n\n[");
   if (marker < 0) return { content: text, notices: [] };
-  const lines = text
-    .slice(marker + 2)
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (!lines.length || !lines.every((line) => NOTICE_PATTERN.test(line)))
+  const tail = text.slice(marker + 2).trim();
+  if (!tail.startsWith("[") || !tail.endsWith("]"))
     return { content: text, notices: [] };
-  return { content: text.slice(0, marker), notices: lines };
+  // 提示语可能多行（例如指路一句 bash 命令）；以 `[` 开头的行算新一条，其余行归上一条。
+  const notices = [];
+  for (const raw of tail.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith("[") || !notices.length) notices.push(line);
+    else notices[notices.length - 1] = `${notices.at(-1)}\n${line}`;
+  }
+  if (!notices.length || !notices.every((notice) => NOTICE_PATTERN.test(notice)))
+    return { content: text, notices: [] };
+  return { content: text.slice(0, marker), notices };
 }
 
 const diffLine = (kind, marker, line, key, lineNumber = "") =>
@@ -244,6 +289,29 @@ const diffLine = (kind, marker, line, key, lineNumber = "") =>
 
 const lineMarker = (kind) =>
   kind === "added" ? "+" : kind === "removed" ? "-" : " ";
+
+// 折叠块标题左侧的类型图标：工具各用一个独立图标，未知工具用通用方块。
+const TOOL_ICONS = {
+  bash: "terminal",
+  powershell: "terminal",
+  read: "file",
+  write: "edit",
+  edit: "diff",
+  grep: "search",
+  find: "filter",
+  ls: "folder",
+};
+// 标题里显示的动词（仅本地化 pi 的三个文件工具，其它保持工具原名）
+const TOOL_LABELS = { read: "读取", write: "写入", edit: "编辑" };
+export function toolLabel(name) {
+  const key = String(name || "").toLowerCase();
+  return TOOL_LABELS[key] || String(name || "");
+}
+
+export function toolIcon(name, skill = false) {
+  if (skill) return "spark";
+  return TOOL_ICONS[String(name || "").toLowerCase()] || "box";
+}
 
 export default defineComponent({
   name: "ToolCallBlock",
@@ -270,7 +338,9 @@ export default defineComponent({
     const args = computed(
       () => props.call?.arguments ?? props.call?.args ?? props.running?.args,
     );
-    const titleArgument = computed(() => toolTitleArgument(args.value));
+    const titleArgument = computed(() =>
+      toolTitleArgument(args.value, name.value),
+    );
     // 读取 SKILL.md 的 read 调用按技能卡片展示（配色与标题都区分开）。
     const skill = computed(() => skillLabel(name.value, args.value));
     const filePath = computed(() => toolFilePath(args.value));
@@ -281,6 +351,8 @@ export default defineComponent({
         ? args.value.content
         : null,
     );
+    // write 的写入状态：结果已回来即成功，否则视为正在写入
+    const writeStatus = computed(() => (props.result ? "done" : "running"));
     const hunks = computed(() =>
       String(name.value).toLowerCase() === "edit" ? editHunks(args.value) : [],
     );
@@ -297,11 +369,9 @@ export default defineComponent({
         ? resultText(props.result)
         : null,
     );
-    // bash/powershell 的结果是终端输出，原样按 pre 展示
-    const shellOutput = computed(() =>
-      ["bash", "powershell"].includes(String(name.value).toLowerCase()) &&
-      props.result &&
-      !props.result.isError
+    // bash/powershell/grep/find/ls 的结果是逐行文本，原样按 pre 展示
+    const plainOutput = computed(() =>
+      isPlainOutputTool(name.value) && props.result && !props.result.isError
         ? resultText(props.result)
         : null,
     );
@@ -347,22 +417,63 @@ export default defineComponent({
       try {
         await writeClipboard(source);
         if (disposed || !button.isConnected) return;
-        button.textContent = "已复制";
+        button.dataset.copied = "1";
       } catch {
         if (disposed || !button.isConnected) return;
-        button.textContent = "复制失败";
+        button.dataset.failed = "1";
       }
       resetTimer = setTimeout(() => {
-        if (button.isConnected) button.textContent = "复制";
+        if (!button.isConnected) return;
+        delete button.dataset.copied;
+        delete button.dataset.failed;
       }, 1500);
     };
     // 专门视图：write 的写入内容 / edit 的变更；原始 JSON 收进二级折叠。
     // read/bash 不做这一套：它们的入参很小（路径/命令），**INPUT 只展示 JSON**，
     // 文件内容与终端输出都归到 OUTPUT。
+    // 工具状态行（write/read/edit 共用）：状态词 + 路径 chip（hover 出复制）+ 可选后缀
+    const stateLine = (verb, suffix) =>
+      h("div", { class: "tool-state-line" }, [
+        h("span", null, `${writeStatus.value === "running" ? "正在" : "成功"}${verb}`),
+        h(
+          "code",
+          { class: "path-chip", title: filePath.value },
+          [filePath.value],
+          filePath.value
+            ? h(
+                "button",
+                { type: "button", class: "chip-copy", "aria-label": "复制路径" },
+                "复制",
+              )
+            : null,
+        ),
+        suffix || null,
+      ]);
+    // read 的后缀：从 N 行开始，共 M 行（缺省项省略）
+    const readRange = () => {
+      const offset = Number(args.value?.offset);
+      const limit = Number(args.value?.limit);
+      const parts = [];
+      if (Number.isFinite(offset) && offset > 0) parts.push(`从 ${offset} 行开始`);
+      if (Number.isFinite(limit) && limit > 0) parts.push(`共 ${limit} 行`);
+      return parts.length
+        ? h("span", { class: "range-hint" }, `（${parts.join("，")}）`)
+        : null;
+    };
+    // edit 的后缀：+新增 绿 / -删除 红（不加粗）
+    const diffStat = () => {
+      const added = diffLines.value.filter((l) => l.kind === "added").length;
+      const removed = diffLines.value.filter((l) => l.kind === "removed").length;
+      if (!added && !removed) return null;
+      return h("span", { class: "diff-stat" }, [
+        added ? h("span", { class: "added" }, `+${added}`) : null,
+        removed ? h("span", { class: "removed" }, `-${removed}`) : null,
+      ]);
+    };
     const dedicated = () => {
       if (writeContent.value != null)
         return h("section", { class: "tool-io-section", onClick: copyInput }, [
-          h("div", { class: "tool-io-label" }, "文件内容"),
+          stateLine("写入"),
           h("div", {
             innerHTML: codeBlock(
               writeContent.value,
@@ -373,7 +484,7 @@ export default defineComponent({
       // 结果已经回来时用宿主算好的 diff（带行号）
       if (diffLines.value.length)
         return h("section", { class: "tool-io-section" }, [
-          h("div", { class: "tool-io-label" }, "变更"),
+          stateLine("编辑", diffStat()),
           h("div", { class: "diff-block" }, [
             h(
               "div",
@@ -392,7 +503,7 @@ export default defineComponent({
         ]);
       if (hunks.value.length)
         return h("section", { class: "tool-io-section" }, [
-          h("div", { class: "tool-io-label" }, "变更"),
+          stateLine("编辑", diffStat()),
           h("div", { class: "diff-block" }, [
             h(
               "div",
@@ -424,7 +535,6 @@ export default defineComponent({
     // read/bash：可读参数行 + 原始 JSON 折叠；其余工具保持直接展示 JSON
     const paramsSection = () =>
       h("section", { class: "tool-io-section" }, [
-        h("div", { class: "tool-io-label" }, "Input"),
         h(
           "dl",
           { class: "tool-params" },
@@ -437,13 +547,11 @@ export default defineComponent({
       ]);
     const jsonSection = () =>
       h("section", { class: "tool-io-section", onClick: copyInput }, [
-        h("div", { class: "tool-io-label" }, "Input"),
         h("div", { innerHTML: inputHtml.value }),
       ]);
     // bash/powershell：命令直接当脚本块高亮，原始 JSON 同样收进折叠
     const commandSection = () =>
       h("section", { class: "tool-io-section", onClick: copyInput }, [
-        h("div", { class: "tool-io-label" }, "Input"),
         h("div", {
           innerHTML: codeBlock(command.value.text, command.value.language),
         }),
@@ -451,14 +559,49 @@ export default defineComponent({
       ]);
     const params = computed(() => toolInputRows(name.value, args.value));
     const command = computed(() => toolCommand(name.value, args.value));
+    // 没有专用视图的工具直接展示 JSON Input + Markdown Output。
+    // 通用形态的输入区：bash/powershell 用对应语言的代码块展示命令，
+    // 其余工具用 JSON。两者都放在同一个透明边框盒子里，与输出以分割线分开。
+    const genericInput = () =>
+      command.value
+        ? h("section", { class: "tool-io-section", onClick: copyInput }, [
+            h("div", {
+              innerHTML: codeBlock(command.value.text, command.value.language),
+            }),
+          ])
+        : jsonSection();
+    // 采用「通用形态」（透明边框盒子）的工具：没有专用视图的工具，以及 bash/powershell。
+    // 盒子形态：bash/powershell（命令代码块）以及没有专用视图的通用工具；
+    // 有专用视图的（write 内容、edit 变更、read/grep/find/ls 参数行）不走盒子。
+    const boxedTool = computed(
+      () =>
+        args.value !== undefined &&
+        !writeContent.value &&
+        !hunks.value.length &&
+        !diffLines.value.length &&
+        !params.value.length,
+    );
+    const genericOutput = () => {
+      let body = null;
+      if (props.result) body = resultContent(props.result);
+      else if (props.running?.partialResult !== undefined)
+        body = [h(MarkdownContent, { text: text(props.running.partialResult) })];
+      return h("section", { class: "tool-io-section tool-output-markdown" }, [
+        h("div", { class: "tool-io-label" }, "Output"),
+        body || h("p", { class: "tool-waiting" }, "等待输出…"),
+      ]);
+    };
     const output = () => {
       // read：按路径语言高亮展示文件内容（行号从 offset 开始；工具提示语不进代码块）
+      // read：状态行（正在/成功读取 + 路径 + 范围）+ 代码块 + 工具提示语
       if (readOutput.value != null) {
         const { content, notices } = splitToolNotices(readOutput.value);
         return h(
-          "div",
-          { class: "tool-output-frame", onClick: copyInput },
+          "section",
+          { class: "tool-io-section", onClick: copyInput },
           [
+            stateLine("读取", readRange()),
+            h("div", { class: "tool-read-code" }, [
             h("div", {
               innerHTML: codeBlock(
                 content,
@@ -467,22 +610,23 @@ export default defineComponent({
               ),
             }),
             notices.length
-              ? h(
-                  "ul",
-                  { class: "tool-notices" },
-                  notices.map((notice, index) =>
-                    h("li", { key: index }, notice),
-                  ),
-                )
-              : null,
+                ? h(
+                    "ul",
+                    { class: "tool-notices" },
+                    notices.map((notice, index) =>
+                      h("li", { key: index }, notice),
+                    ),
+                  )
+                : null,
+              ]),
           ],
         );
       }
-      // bash/powershell：终端输出原样展示，可换行但不走 markdown
-      if (shellOutput.value != null) {
-        const { content, notices } = splitToolNotices(shellOutput.value);
+      // bash/powershell/grep/find/ls：逐行文本原样展示，可换行但不走 markdown
+      if (plainOutput.value != null) {
+        const { content, notices } = splitToolNotices(plainOutput.value);
         return h("div", { class: "tool-output-frame" }, [
-          content ? h("pre", { class: "shell-output" }, content) : null,
+          content ? h("pre", { class: "plain-output" }, content) : null,
           notices.length
             ? h(
                 "ul",
@@ -516,13 +660,24 @@ export default defineComponent({
       return h(
         DisclosureBlock,
         {
-          class: ["tool-block", `tool-${status}`, skill.value && "tool-skill"],
+          class: [
+            "tool-block",
+            `tool-${status}`,
+            // 折叠块的两种状态：正常=灰、报错=红（整行含图标/标题/摘要）
+            status === "failure" && "is-error",
+            skill.value && "tool-skill",
+            boxedTool.value && "tool-generic",
+            command.value && "tool-shell",
+          ],
           blockKey: props.blockKey,
+          icon: toolIcon(name.value, Boolean(skill.value)),
         },
         {
           summary: () => [
             h("span", { class: "tool-title" }, [
-              h("strong", skill.value ? "skill" : name.value),
+              h("strong", skill.value ? "skill" : toolLabel(name.value)),
+              (skill.value || titleArgument.value) &&
+                h("span", { class: "disclosure-separator" }, "·"),
               (skill.value || titleArgument.value) &&
                 h("span", skill.value || titleArgument.value),
             ]),
@@ -546,22 +701,35 @@ export default defineComponent({
             ),
           ],
           default: () => [h("div", { class: "tool-body" }, [
-            dedicatedNode ??
-              (args.value !== undefined &&
-                (params.value.length
-                  ? paramsSection()
-                  : command.value
-                    ? commandSection()
-                    : jsonSection())),
-            dedicatedNode && rawInput(),
-            outputNode &&
-              h("section", { class: "tool-io-section" }, [
-                h("div", { class: "tool-io-label" }, "Output"),
-                outputNode,
-              ]),
-            !outputNode &&
-              status === "running" &&
-              h("p", { class: "tool-waiting" }, "等待输出…"),
+            // 通用形态：输入（bash 命令块 / JSON）+ 输出，用透明边框盒子包住，中间一条分割线。
+            boxedTool.value
+              ? [
+                  h("div", { class: "tool-generic-box" }, [
+                    genericInput(),
+                    genericOutput(),
+                  ]),
+                ]
+              : [
+                  // read/write/edit 用「状态行 + 内容」的专用视图（read 也不再展示原始参数）；
+                  // 其余工具按形态展示：shell 用命令块，其它用 JSON
+                  dedicatedNode ??
+                    (args.value !== undefined &&
+                      (command.value ? commandSection() : jsonSection())),
+                  // 专用视图不再显示「原始 Input」：路径、范围与变更都已完整展示
+                  dedicatedNode &&
+                    !writeContent.value &&
+                    !params.value.length &&
+                    !diffLines.value.length &&
+                    !hunks.value.length &&
+                    rawInput(),
+                  outputNode && !writeContent.value && !diffLines.value.length && !hunks.value.length &&
+                    h("section", { class: "tool-io-section" }, [
+                                    outputNode,
+                    ]),
+                  !outputNode &&
+                    status === "running" &&
+                    h("p", { class: "tool-waiting" }, "等待输出…"),
+                ],
           ])],
         },
       );

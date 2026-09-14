@@ -13,6 +13,8 @@ import {
   blankAnswer,
   answerText,
   serializeAnswers,
+  sanitizeQuestions,
+  isAnswered,
 } from "./answers.js";
 
 export default defineComponent({
@@ -25,13 +27,14 @@ export default defineComponent({
     try {
       saved = JSON.parse(sessionStorage.getItem(storageKey));
     } catch {}
+    const questions = sanitizeQuestions(props.request.questions);
     const host = ref(),
       state = reactive({
         tab: 0,
         collapsed: false,
         previews: new Set(),
         notes: new Set(),
-        answers: normalizeAnswers(props.request.questions, saved?.answers),
+        answers: normalizeAnswers(questions, saved?.answers),
         globalNote:
           typeof saved?.globalNote === "string"
             ? saved.globalNote.slice(0, 32000)
@@ -39,7 +42,7 @@ export default defineComponent({
       });
     for (const [index, answer] of state.answers.entries())
       if (answer.notes) state.notes.add(index);
-    const review = computed(() => state.tab === props.request.questions.length);
+    const review = computed(() => state.tab === questions.length);
     const save = () => {
       try {
         sessionStorage.setItem(
@@ -85,27 +88,39 @@ export default defineComponent({
     });
     const choose = (index) =>
       update(() => {
-        const question = props.request.questions[state.tab],
+        const question = questions[state.tab],
           answer = state.answers[state.tab];
         if (question.multiSelect) {
-          answer.kind = "multi";
+          // 勾选与自由文本是**两个独立的存储**（宿主 `multiSelectChecked` /
+          // `customDraftsByTab`）：勾选/取消勾选都不清空已输入的自由文本，
+          // 也不改变它的勾选态；两者可共存。
           answer.options = answer.options.includes(index)
             ? answer.options.filter((i) => i !== index)
             : [...answer.options, index];
+          answer.kind = "multi";
+          // 绝不碰 `custom`：自由文本行自己的勾选态独立于其它选项，
+          // 勾选/取消任何普通选项都不能改变它（也不能由 text 反推）。
         } else {
           answer.kind = "option";
           answer.option = index;
           answer.custom = false;
+          answer.text = "";
         }
       });
     const custom = (text, checked = true) =>
       update(() => {
+        const question = questions[state.tab];
         const answer = state.answers[state.tab];
         answer.text = text;
         answer.custom = checked;
-        answer.kind = props.request.questions[state.tab].multiSelect
-          ? "multi"
-          : "custom";
+        // 多选题的 kind 恒为 `multi`：自由文本由 `text` 携带，提交时并入 selected。
+        // 单选题的自由回答是独立的答案类型（`custom`），绝不能写成 `multi`，
+        // 否则 result.ts 会按「多选题」校验并报「无效多选答案」。
+        if (question.multiSelect) {
+          answer.kind = "multi";
+          return;
+        }
+        answer.kind = checked ? "custom" : "unanswered";
       });
     const send = (cancel) => {
       if (!props.pending)
@@ -123,9 +138,33 @@ export default defineComponent({
     const button = (label, attrs) =>
       h("button", { type: "button", disabled: props.pending, ...attrs }, label);
     return () => {
-      const questions = props.request.questions,
-        question = questions[state.tab],
+      const question = questions[state.tab],
         answer = state.answers[state.tab];
+      // 空/超界的请求（sanitize 后仍为空）与越界 tab 都回退到提示；核对页没有当前题
+      if (!questions.length || (!review.value && (!question || !answer)))
+        return h(
+          "div",
+          { class: "ask-user-form", "data-ask-id": props.request.id, ref: host },
+          [
+            h("header", { class: "ask-header" }, [
+              h("span", [h("strong", { class: "ask-title" }, "无法渲染问卷")]),
+            ]),
+            h("div", { class: "ask-content" }, [
+              h(
+                "p",
+                { class: "ask-warning" },
+                "该请求的问卷格式不受支持，可在 TUI 中完成。",
+              ),
+            ]),
+            h("footer", { class: "ask-footer" }, [
+              h("span", { class: "spacer" }),
+              button("取消问卷", {
+                "data-ask-cancel": "",
+                onClick: () => send(true),
+              }),
+            ]),
+          ],
+        );
       const single = questions.length === 1;
       const children = [];
       if (!single)
@@ -133,7 +172,7 @@ export default defineComponent({
           h("nav", { class: "ask-tabs" }, [
             ...questions.map((q, index) =>
               button(
-                `${index + 1}. ${q.header}${state.answers[index].kind !== "unanswered" ? " ✓" : ""}`,
+                `${index + 1}. ${q.header}${isAnswered(q, state.answers[index]) ? " ✓" : ""}`,
                 {
                   key: index,
                   "data-ask-tab": index,
@@ -151,7 +190,7 @@ export default defineComponent({
         );
       if (review.value) {
         const missing = questions
-          .filter((q, index) => state.answers[index].kind === "unanswered")
+          .filter((q, index) => !isAnswered(q, state.answers[index]))
           .map((q) => q.header);
         children.push(
           h("h3", "核对答案"),
@@ -242,7 +281,9 @@ export default defineComponent({
                         },
                         [
                           h("summary", `查看 ${option.label} 的预览`),
-                          h(MarkdownContent, { text: option.preview }),
+                          // preview 是 Markdown，但契约要求多行文本按行渲染，
+                          // 因此开启硬换行（否则 ASCII 布局会被折叠成一行）
+                          h(MarkdownContent, { text: option.preview, breaks: true }),
                         ],
                       ),
                   ],
@@ -254,8 +295,10 @@ export default defineComponent({
                     type: question.multiSelect ? "checkbox" : "radio",
                     name: `answer-${props.request.id}`,
                     "data-ask-custom": "",
+                    // 多选下自由文本有自己独立的勾选态 `custom`，不能被其它
+                    // 选项的勾选影响（单选仍是「选中即替代选项」的语义）。
                     checked: question.multiSelect
-                      ? answer.kind === "multi" && answer.custom
+                      ? answer.custom
                       : answer.kind === "custom",
                     onChange: (event) =>
                       custom(answer.text, event.target.checked),
@@ -268,7 +311,7 @@ export default defineComponent({
                       "aria-label": "自行填写",
                       value: answer.text,
                       placeholder: question.multiSelect
-                        ? "输入其他回答，可与上方选项同时选择"
+                        ? "输入其他回答，可与上方已选选项一起提交"
                         : "输入自己的回答，替代上方选项",
                       onFocus: () => custom(answer.text),
                       onInput: (event) => custom(event.target.value),
@@ -367,7 +410,7 @@ export default defineComponent({
                   class: "primary",
                   "data-ask-submit": "",
                   disabled:
-                    props.pending || (single && answer?.kind === "unanswered"),
+                    props.pending || (single && !isAnswered(question, answer)),
                   onClick: () => send(false),
                 })
               : button(

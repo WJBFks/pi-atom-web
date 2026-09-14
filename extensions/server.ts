@@ -219,6 +219,10 @@ export async function startServer({ snapshot, action, connection }) {
         return reply(403, { error: "请求来源不匹配" });
       }
       const url = new URL(req.url, origin);
+      if (req.method === "GET" && url.pathname === "/favicon.ico") {
+        res.writeHead(204, { "Cache-Control": "public, max-age=86400" });
+        return res.end();
+      }
       const asset = staticAssets.get(url.pathname);
       if (asset && req.method === "GET") {
         const body = await readFile(new URL(asset[0], import.meta.url));

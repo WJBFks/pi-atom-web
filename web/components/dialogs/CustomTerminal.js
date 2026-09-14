@@ -8,6 +8,37 @@ import {
 } from "vue";
 import { postAction } from "../../api/actions.js";
 
+let xtermPromise;
+const loadAsset = (tag, url) =>
+  new Promise((resolve, reject) => {
+    const attribute = tag === "link" ? "href" : "src";
+    const existing = document.querySelector(`${tag}[${attribute}="${url}"]`);
+    const element = existing || document.createElement(tag);
+    if (tag === "link") element.rel = "stylesheet";
+    element[attribute] = url;
+    element.addEventListener("load", resolve, { once: true });
+    element.addEventListener("error", () => reject(new Error(`无法加载 ${url}`)), {
+      once: true,
+    });
+    if (!existing) document.head.append(element);
+  });
+const loadXterm = () => {
+  if (globalThis.Terminal) return Promise.resolve(globalThis.Terminal);
+  xtermPromise ||= Promise.all([
+    loadAsset("link", "/xterm.css"),
+    loadAsset("script", "/xterm.js"),
+  ])
+    .then(() => {
+      if (!globalThis.Terminal) throw new Error("xterm 加载完成但未提供 Terminal");
+      return globalThis.Terminal;
+    })
+    .catch((error) => {
+      xtermPromise = undefined;
+      throw error;
+    });
+  return xtermPromise;
+};
+
 export const sanitizeLine = (line) =>
   String(line)
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
@@ -110,8 +141,17 @@ export default defineComponent({
       }
       requestAnimationFrame(fit);
     };
-    onMounted(() => {
-      terminal = new Terminal({
+    let disposed = false;
+    onMounted(async () => {
+      let TerminalClass;
+      try {
+        TerminalClass = await loadXterm();
+      } catch (error) {
+        if (!disposed) props.onError?.(error);
+        return;
+      }
+      if (disposed) return;
+      terminal = new TerminalClass({
         cols: 80,
         rows: 1,
         scrollback: 0,
@@ -137,6 +177,7 @@ export default defineComponent({
       deep: true,
     });
     onBeforeUnmount(() => {
+      disposed = true;
       sender.dispose();
       observer?.disconnect();
       disposeInput?.dispose();

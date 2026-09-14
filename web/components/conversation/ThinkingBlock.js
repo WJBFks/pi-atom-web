@@ -120,13 +120,15 @@ export default defineComponent({
           blockKey: props.blockKey,
           open: open.value,
           remember: false,
+          icon: "thinking",
           onToggle: toggled,
           summaryProps: { onPointerdown: markIntent, onKeydown: markIntent },
         },
         {
           summary: () => [
             h("span", { class: "thinking-row" }, [
-              h("strong", "Thinking"),
+              h("strong", "思考"),
+              h("span", { class: "disclosure-separator" }, "·"),
               h(
                 "span",
                 {

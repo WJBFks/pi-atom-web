@@ -30,6 +30,13 @@ export function createPackageCompatibilityRegistry(pi) {
 
   for (const state of states)
     pi.events?.on?.(state.descriptor.eventName, payload => {
+      // 已激活时直接投递给适配器：缓冲只在“事件先于适配器加载”时用来暂存，
+      // 若不过滤就会把历史事件在每次加载/replay 中重复注入，使适配器看到多个
+      // 候选而拒绝认领（表现为第二个问卷静默退回通用终端）。
+      if (state.adapter) {
+        state.adapter.prompt(payload);
+        return;
+      }
       state.prompts.push(payload);
       void activate(state);
     });
@@ -49,9 +56,13 @@ export function createPackageCompatibilityRegistry(pi) {
       }
     },
     async takeCustom(factory) {
-      const activated = states.filter(state => state.loading);
-      await Promise.all(activated.map(state => state.loading));
-      const claims = activated.map(state => state.adapter?.take(factory)).filter(Boolean);
+      // 候选 = 已激活的适配器 + 正在加载的。只按 `loading` 筛会让首次认领之后
+      // 的每次请求全部落空（loading 一旦 resolve 就不再进入这个列表），表现为
+      // 第二个问卷静默退回通用终端。必须先等加载完成，再询问所有已就绪的适配器。
+      const candidates = states.filter(state => state.loading);
+      await Promise.all(candidates.map(state => state.loading));
+      const ready = states.filter(state => state.adapter);
+      const claims = ready.map(state => state.adapter.take(factory)).filter(Boolean);
       return claims.length === 1 ? claims[0] : undefined;
     },
     activePackageIds() {

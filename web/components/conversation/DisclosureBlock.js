@@ -1,4 +1,5 @@
 import { defineComponent, h, ref, useAttrs } from "vue";
+import { icon } from "../../icons.js";
 import { useConversationStore } from "../../stores/conversation.js";
 
 export default defineComponent({
@@ -11,6 +12,8 @@ export default defineComponent({
     remember: { type: Boolean, default: true },
     summaryProps: Object,
     rootRef: Function,
+    // 标题左侧的类型图标：折叠时显示它，悬停时换成折叠三角 ▸，展开时常态是 ▾
+    icon: String,
   },
   emits: ["toggle"],
   setup(props, { emit, slots }) {
@@ -41,7 +44,17 @@ export default defineComponent({
           },
         },
         [
-          h("summary", props.summaryProps, slots.summary?.()),
+          h("summary", props.summaryProps, [
+            props.icon
+              ? h("span", { class: "disclosure-icon" }, [
+                  h("span", { class: "disclosure-type-icon" }, [
+                    icon(props.icon),
+                  ]),
+                  h("span", { class: "disclosure-caret" }),
+                ])
+              : null,
+            slots.summary?.(),
+          ]),
           h("div", { class: "disclosure-body" }, slots.default?.()),
         ],
       );

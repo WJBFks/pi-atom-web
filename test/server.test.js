@@ -3,6 +3,7 @@ import http from "node:http";
 import test from "node:test";
 import { pickLanAddresses, startServer } from "../extensions/server.ts";
 import {
+  HISTORY_PAGE_TURNS,
   HISTORY_TURNS,
   historyCutIndex,
   olderHistory,
@@ -252,15 +253,25 @@ test("history window keeps the newest turns and pages backwards by cursor", () =
   assert.equal(small.historyComplete, true);
   assert.equal(small.messages.length, 8);
 
-  // 以客户端最老一条为游标向前翻页，每页同样 10 轮，直到最早一页
-  const first = olderHistory(messages, messages.findIndex((m) => m.id === "u15"));
-  assert.equal(first.messages[0].id, "u5");
+  // 以客户端最老一条为游标向前翻页，每页 5 轮，直到最早一页
+  const first = olderHistory(
+    messages,
+    messages.findIndex((m) => m.id === "u15"),
+    HISTORY_PAGE_TURNS,
+  );
+  assert.equal(first.messages[0].id, "u10");
   assert.equal(first.messages.at(-1).id, "a14");
-  assert.equal(first.start, 10);
-  const second = olderHistory(messages, first.start);
-  assert.equal(second.messages[0].id, "u0");
-  assert.equal(second.start, 0);
-  assert.equal(olderHistory(messages, second.start).messages.length, 0);
+  assert.equal(first.start, 20);
+  const second = olderHistory(messages, first.start, HISTORY_PAGE_TURNS);
+  assert.equal(second.messages[0].id, "u5");
+  assert.equal(second.start, 10);
+  const third = olderHistory(messages, second.start, HISTORY_PAGE_TURNS);
+  assert.equal(third.messages[0].id, "u0");
+  assert.equal(third.start, 0);
+  assert.equal(
+    olderHistory(messages, third.start, HISTORY_PAGE_TURNS).messages.length,
+    0,
+  );
 
   // 没有用户消息或轮数不足时都从 0 开始
   assert.equal(historyCutIndex([], HISTORY_TURNS), 0);
@@ -397,6 +408,8 @@ test("serves only the local ESM dependency whitelist with an import-map CSP hash
   t.after(() => server.close());
   const vue = await fetch(new URL("/vendor/vue.js", server.url));
   assert.equal(vue.status, 200);
+  const favicon = await fetch(new URL("/favicon.ico", server.url));
+  assert.equal(favicon.status, 204);
   const unknown = await fetch(new URL("/vendor/not-allowed.js", server.url), {
     headers: { Authorization: `Bearer ${new URL(server.url).hash.slice(1)}` },
   });

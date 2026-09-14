@@ -25,6 +25,18 @@ const iconPaths = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16Z"/><path d="m13 7 4 4"/>',
   reload: '<path d="M20 11a8 8 0 1 0-2.4 5.7"/><path d="M20 5v6h-6"/>',
   reset: '<path d="M4 13a8 8 0 1 0 2.4-5.7"/><path d="M4 7v6h6"/>',
+  // 折叠块左侧的类型图标（工具各用一个独立图标）
+  terminal: '<path d="M4 5h16v14H4Z"/><path d="m7 9 3 3-3 3M13 15h4"/>',
+  file: '<path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v4h4"/>',
+  search: '<circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/>',
+  filter: '<path d="M4 5h16l-6 7v6l-4 2v-8Z"/>',
+  folder: '<path d="M3 6h6l2 2h10v11H3Z"/>',
+  diff: '<path d="M7 3v18M17 3v18"/><path d="M11 8h3M11 12h3M11 16h3"/>',
+  bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l2 3H4Z"/><path d="M10 19a2 2 0 0 0 4 0"/>',
+  box: '<path d="M3 7h18v13H3Z"/><path d="M3 7l3-4h12l3 4M9 12h6"/>',
+  spark: '<path d="M12 3l2.4 6.1L20 12l-5.6 2.9L12 21l-2.4-6.1L4 12l5.6-2.9Z"/>',
+  "chevron-right": '<path d="m10 6 6 6-6 6"/>',
+  "chevron-down": '<path d="m6 10 6 6 6-6"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
 };

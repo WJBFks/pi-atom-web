@@ -16,10 +16,11 @@ import { createSessionStateStore } from "./session-state.ts";
 
 const RELOAD_HANDOFF = Symbol.for("pi-atom-web.reload-handoff");
 import {
+  HISTORY_PAGE_TURNS,
   HISTORY_TURNS,
   historyCutIndex,
   olderHistory,
-  windowedHistory,
+  windowedHistory as calculateWindowedHistory,
 } from "./history-window.ts";
 
 const INTERNAL_RELOAD_COMMAND = "pi-atom-web-reload";
@@ -409,7 +410,7 @@ export default function atomWeb(pi) {
   }
   // 首屏只带最近 HISTORY_TURNS 轮：更早的由客户端用 more_history 按游标向前懒加载。
   function windowedMessages() {
-    return windowedHistory(displayMessages(), HISTORY_TURNS);
+    return calculateWindowedHistory(displayMessages(), HISTORY_TURNS);
   }
   function snapshot() {
     const value = {
@@ -452,18 +453,12 @@ export default function atomWeb(pi) {
       );
     return value;
   }
-  // 首屏只带最近 HISTORY_TURNS 轮：更早的由客户端用 more_history 按游标向前懒加载。
-  function windowedHistory() {
-    const all = displayMessages();
-    const cut = historyCutIndex(all);
-    return { messages: all.slice(cut), historyComplete: cut === 0 };
-  }
   function publish(ctx, patch = {}, refresh = {}) {
     context = ctx;
     if (server) attachNotifications();
     // 历史字段在出口统一裁剪成窗口：流式期间不再重复发送整段会话。
     if (Array.isArray(patch.messages)) {
-      const window = windowedHistory(patch.messages, HISTORY_TURNS);
+      const window = calculateWindowedHistory(patch.messages, HISTORY_TURNS);
       patch = { ...patch, ...window };
     }
     const sessionChanged =
@@ -503,7 +498,7 @@ export default function atomWeb(pi) {
         // Read persisted history only after Pi has returned from the event callback.
         const refreshed = {};
         if (historyDirty) {
-          refreshed.messages = displayMessages();
+          Object.assign(refreshed, windowedMessages());
           refreshed.pendingUserMessages = pendingUserMessages();
         }
         if (statsDirty) refreshed.stats = sessionStats();
@@ -554,7 +549,7 @@ export default function atomWeb(pi) {
       const { messages: chunk, start } = olderHistory(
         all,
         index,
-        HISTORY_TURNS,
+        HISTORY_PAGE_TURNS,
       );
       publish(context, {
         prependMessages: chunk,

@@ -142,15 +142,25 @@ test("protocol validates package-scoped questionnaire requests", () => {
       requests: [{ ...request, sessionId: undefined }],
     }),
   );
-  assert.throws(() =>
+  // 字段级 schema 属于拥有该请求的包模块（extensions/packages/*），协议层只保证
+  // 通用有界：JSON 可序列化 + 总长度上限，畸形问卷由包模块拒绝认领。
+  assert.equal(
     validateSnapshot({
       ...snapshot,
       requests: [{
         ...request,
         questions: [{ ...request.questions[0], options: [] }],
       }],
+    }).requests[0].questions[0].options.length,
+    0,
+  );
+  assert.throws(() =>
+    validateSnapshot({
+      ...snapshot,
+      requests: [{ ...request, payload: "x".repeat(300 * 1024) }],
     }),
   );
+  assert.throws(() => validateSnapshot({ ...snapshot, requests: [{ ...request, bad: () => {} }] }));
 });
 
 test("snapshot accepts Pi bashExecution entries without content", () => {

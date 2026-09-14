@@ -20,30 +20,26 @@ export default defineComponent({
     useSettingsStore().load();
     let stream;
     let persistTimer;
-    // 首屏只带最近若干轮：渲染完后在后台逐页向前补齐（新→旧逆序），
-    // 每次都用客户端当前最老一条的 id 当游标，服务端据此再向前切一页。
+    // 首屏只带最近若干轮。更早历史由消息区在用户滚到顶部时按需请求；
+    // 禁止连接后自动逐页灌入，否则会连续触发全量分组、Markdown 与布局计算。
     let loadingCursor;
-    let olderTimer;
     const loadOlderHistory = () => {
       if (!token || !session.sessionId) return;
       if (conversation.historyComplete) return;
       const cursor = conversation.oldestMessageId();
       if (!cursor || cursor === loadingCursor) return;
       loadingCursor = cursor;
-      clearTimeout(olderTimer);
-      olderTimer = setTimeout(async () => {
-        try {
-          await postAction(token, {
-            type: "more_history",
-            sessionId: session.sessionId,
-            cursor,
-          });
-        } catch (error) {
+      postAction(token, {
+        type: "more_history",
+        sessionId: session.sessionId,
+        cursor,
+      })
+        .catch((error) => {
           session.error = error.message;
-        } finally {
+        })
+        .finally(() => {
           loadingCursor = undefined;
-        }
-      }, 120);
+        });
     };
     conversation.configurePersistence((state) => {
       clearTimeout(persistTimer);
@@ -67,7 +63,6 @@ export default defineComponent({
         conversation.applyPatch(data);
         dialogs.applyPatch(data);
       }
-      loadOlderHistory();
       const old = sessionStorage.getItem("atom-refresh-after-reload");
       if (old && session.instanceId && old !== session.instanceId) {
         sessionStorage.removeItem("atom-refresh-after-reload");
@@ -88,7 +83,6 @@ export default defineComponent({
       stream?.stop();
       stream = undefined;
       clearTimeout(persistTimer);
-      clearTimeout(olderTimer);
     };
     onMounted(() => {
       document.addEventListener("pointerdown", dismiss);
@@ -138,6 +132,7 @@ export default defineComponent({
             Component &&
             h(Component, {
               token,
+              onLoadOlderHistory: loadOlderHistory,
               onError: (error) => {
                 session.error = error.message;
               },

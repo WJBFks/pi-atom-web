@@ -1,5 +1,6 @@
 import {
   defineComponent,
+  defineAsyncComponent,
   h,
   nextTick,
   onMounted,
@@ -15,16 +16,17 @@ import ConversationFeed from "../components/conversation/ConversationFeed.js";
 import ComposerDock from "../components/composer/ComposerDock.js";
 import ColumnResizer from "../components/layout/ColumnResizer.js";
 import ViewTabs from "../components/layout/ViewTabs.js";
-import ContextView from "./ContextView.js";
-import SettingsView from "./SettingsView.js";
 import { icon } from "../icons.js";
+
+const ContextView = defineAsyncComponent(() => import("./ContextView.js"));
+const SettingsView = defineAsyncComponent(() => import("./SettingsView.js"));
 
 // 对话与轨迹共用同一个消息区（只是渲染方式不同），切换 tab 时保持挂载，避免丢失滚动位置。
 const FEED_VIEWS = ["chat", "trace"];
 
 export default defineComponent({
   name: "ChatView",
-  props: { token: String, onError: Function },
+  props: { token: String, onError: Function, onLoadOlderHistory: Function },
   setup(props) {
     const session = useSessionStore(),
       composer = useComposerStore(),
@@ -163,31 +165,32 @@ export default defineComponent({
                 h(ConversationFeed, {
                   ref: conversationFeed,
                   trace: composer.view === "trace",
+                  onLoadOlderHistory: props.onLoadOlderHistory,
                   onAtBottomChange: (value) => {
                     atBottom.value = value;
                   },
                 }),
               ],
             ),
-            h(
+            composer.view === "context" && h(
               "div",
               {
                 class: [
                   "view-pane",
                   "page-pane",
-                  composer.view !== "context" && "is-inactive",
+                  "is-active",
                 ],
                 id: "view-panel-context",
               },
               [h(ContextView)],
             ),
-            h(
+            composer.view === "settings" && h(
               "div",
               {
                 class: [
                   "view-pane",
                   "page-pane",
-                  composer.view !== "settings" && "is-inactive",
+                  "is-active",
                 ],
                 id: "view-panel-settings",
               },

@@ -117,15 +117,23 @@ export default defineComponent({
         return h(
           DisclosureBlock,
           {
-            class: ["notification-block", `notification-${level}`],
+            class: [
+              "notification-block",
+              `notification-${level}`,
+              // 通知按级别落状态：warning=橙、error=红（整行含图标/标题/摘要），info=正常灰
+              level === "warning" && "is-warning",
+              level === "error" && "is-error",
+            ],
             blockKey: key,
             "data-notification": level,
+            // 图标与标题、摘要同色：info 灰、warning 橙、error 红
+            icon: "bell",
           },
           {
             summary: () => [
               h("span", { class: "disclosure-summary-row" }, [
-                h("strong", "TUI 通知"),
-                h("span", { class: "disclosure-meta" }, level),
+                h("strong", "通知"),
+                h("span", { class: "disclosure-separator" }, "·"),
                 h("span", { class: "disclosure-preview" }, preview),
               ]),
             ],

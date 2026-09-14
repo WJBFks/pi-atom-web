@@ -14,7 +14,7 @@ import LiveFeed from "./LiveFeed.js";
 
 export default defineComponent({
   name: "ConversationFeed",
-  props: { trace: Boolean },
+  props: { trace: Boolean, onLoadOlderHistory: Function },
   emits: ["atBottomChange"],
   setup(props, { emit, expose }) {
     const conversation = useConversationStore();
@@ -22,6 +22,10 @@ export default defineComponent({
     const scroll = shallowRef();
     const follow = shallowRef(true);
     let bottomFrame;
+    let historyTopArmed = true;
+    let prependHeight = 0;
+    let prependTop = 0;
+    const HISTORY_TOP_THRESHOLD = 48;
     const bottom = () => {
       const node = scroll.value;
       if (node && follow.value)
@@ -35,6 +39,24 @@ export default defineComponent({
       if (next === follow.value) return;
       follow.value = next;
       emit("atBottomChange", next);
+    };
+    const trackHistory = () => {
+      const node = scroll.value;
+      if (!node) return;
+      if (node.scrollTop > HISTORY_TOP_THRESHOLD) {
+        historyTopArmed = true;
+        return;
+      }
+      if (!historyTopArmed || conversation.historyComplete) return;
+      historyTopArmed = false;
+      props.onLoadOlderHistory?.();
+    };
+    const onScroll = () => {
+      track();
+      trackHistory();
+    };
+    const onWheel = (event) => {
+      if (event.deltaY < 0) trackHistory();
     };
     const scrollToBottom = () => {
       if (!follow.value) {
@@ -62,8 +84,25 @@ export default defineComponent({
       },
       { flush: "post" },
     );
+    watch(
+      () => conversation.prependedCount,
+      () => {
+        const node = scroll.value;
+        if (!node) return;
+        prependHeight = node.scrollHeight;
+        prependTop = node.scrollTop;
+        nextTick(() => {
+          const current = scroll.value;
+          if (!current) return;
+          current.scrollTop =
+            prependTop + Math.max(0, current.scrollHeight - prependHeight);
+          track();
+        });
+      },
+      { flush: "pre" },
+    );
     return () =>
-      h("div", { id: "scroll", ref: scroll, onScroll: track }, [
+      h("div", { id: "scroll", ref: scroll, onScroll, onWheel }, [
         h("div", { id: "messages" }, [
           h(HistoryFeed, { trace: props.trace }),
           h(LiveFeed, { trace: props.trace }),

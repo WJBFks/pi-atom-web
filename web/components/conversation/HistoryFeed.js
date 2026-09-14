@@ -58,9 +58,13 @@ export default defineComponent({
         : groupMessages(messages, {
             // 已经显示、尚未进入历史的用户消息也算「下一个用户输入开始」。
             nextUserInput: conversation.pendingUserMessages.length > 0,
-            // 加载（首次快照）/reload 时已加载的中间过程全部折叠
+            // 加载（首次快照 / /reload）时已加载的中间过程全部折叠
             // （会话正在生成时保留正在跑的那一轮）。
-            collapseTail: conversation.collapseLoaded && !session.busy,
+            collapseLoaded: conversation.collapseLoaded,
+            running:
+              session.busy ||
+              Boolean(conversation.liveMessage) ||
+              conversation.tools.length > 0,
           });
       return h("div", { id: "message-history" }, entries.map(renderEntry));
     };
