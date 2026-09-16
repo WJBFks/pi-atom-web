@@ -12,6 +12,7 @@ export const useSessionStore = defineStore("session", {
     thinkingLevels: [],
     busy: false,
     pending: false,
+    promptQueue: { revision: 0, count: 0, steering: [], followUp: [] },
     commands: [],
     stats: null,
     connection: "connecting",

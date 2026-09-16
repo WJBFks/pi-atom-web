@@ -41,3 +41,46 @@ test("corrupt or unsupported session state safely becomes empty", async () => {
     await store.close();
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
+
+// 状态提示 / 中止提示的 display 记录必须能落盘并恢复：
+// session-state 原先只白名单了 ["command","notification"]，新角色会被静默丢弃。
+test("status and interrupted display records survive a persist and restore round trip", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-atom-web-state-"));
+  try {
+    const store = await createSessionStateStore({ cwd, sessionId: "roundtrip" });
+    store.replace({
+      schemaVersion: 1,
+      toolTimings: {},
+      thinkingTimings: {},
+      disclosures: {},
+      displayRecords: [
+        { id: "r1", sessionId: "roundtrip", anchor: null, message: { role: "status", content: "模型已切换为`x · high`" } },
+        { id: "r2", sessionId: "roundtrip", anchor: null, message: { role: "interrupted", content: "操作已中断", level: "tool-aborted", detail: "Operation aborted" } },
+        { id: "r3", sessionId: "roundtrip", anchor: null, message: { role: "command", content: "/help" } },
+        // 不在白名单里的角色仍应被丢弃
+        { id: "r4", sessionId: "roundtrip", anchor: null, message: { role: "tool", content: "drop" } },
+      ],
+    });
+    await store.flush();
+    await store.close();
+
+    const reopened = await createSessionStateStore({ cwd, sessionId: "roundtrip" });
+    const state = await reopened.load();
+    await reopened.close();
+    assert.deepEqual(
+      state.displayRecords.map((record) => record.message.role).sort(),
+      ["command", "interrupted", "status"],
+    );
+    assert.equal(
+      state.displayRecords.find((record) => record.message.role === "status").message.content,
+      "模型已切换为`x · high`",
+    );
+    assert.equal(
+      state.displayRecords.find((record) => record.message.role === "interrupted").message.detail,
+      "Operation aborted",
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+

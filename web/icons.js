@@ -38,7 +38,12 @@ const iconPaths = {
   "chevron-right": '<path d="m10 6 6 6-6 6"/>',
   "chevron-down": '<path d="m6 10 6 6 6-6"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
+  minus: '<path d="M5 12h14"/>',
+  // 提问（ask_user_question 等活动组件用）
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.2 9.4a2.9 2.9 0 1 1 3.8 2.75c-.7.28-1 .85-1 1.55v.3"/><path d="M12 17.2h.01"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
+  // 圆圈感叹号：命令的“hover 看完整命令 / 点击复制”提示
+  alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7.6v5.2"/><path d="M12 16.4h.01"/>',
 };
 export function icon(name) {
   return h("svg", {

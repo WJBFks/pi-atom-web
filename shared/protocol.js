@@ -63,6 +63,8 @@ function message(value, name = "message") {
       "toolResult",
       "bashExecution",
       "command",
+      "status",
+      "interrupted",
       "notification",
       "customEntry",
       "custom",
@@ -71,6 +73,23 @@ function message(value, name = "message") {
     ].includes(item.role)
   )
     fail(`${name}.role 无效`);
+  if (item.role === "interrupted") {
+    // 中止原因（aborted / error）与详情可选；正文是简短说明。
+    if ("level" in item) string(item.level, `${name}.level`, { empty: true, max: 64 });
+    if ("detail" in item)
+      string(item.detail, `${name}.detail`, { empty: true, max: MAX_TEXT_LENGTH });
+    content(item.content);
+    return;
+  }
+  if (item.role === "status" || item.role === "interrupted") {
+    // status：模型/思考级别变更提示；interrupted：中止（用户中断 / 模型或工具报错）。
+    if ("level" in item) string(item.level, `${name}.level`, { empty: true, max: 64 });
+    if ("detail" in item)
+      string(item.detail, `${name}.detail`, { empty: true, max: MAX_TEXT_LENGTH });
+    if ("hint" in item) string(item.hint, `${name}.hint`, { empty: true, max: 1024 });
+    content(item.content);
+    return;
+  }
   if (item.role === "bashExecution") {
     string(item.command, `${name}.command`, {
       empty: true,
@@ -147,6 +166,28 @@ function disclosures(value, name) {
     if (typeof open !== "boolean") fail(`${name}.${id} 无效`);
   }
 }
+function promptQueue(value) {
+  const queue = object(value, "promptQueue");
+  keysOnly(queue, ["revision", "count", "steering", "followUp"], "promptQueue");
+  if (!Number.isInteger(queue.revision) || queue.revision < 0)
+    fail("promptQueue.revision 无效");
+  const validateItems = (items, kind) => {
+    if (!Array.isArray(items) || items.length > 500)
+      fail(`promptQueue.${kind} 无效`);
+    for (const [position, value] of items.entries()) {
+      const item = object(value, `promptQueue.${kind}`);
+      keysOnly(item, ["id", "kind", "index", "text"], `promptQueue.${kind}`);
+      string(item.id, "promptQueue.id", { max: 1024 });
+      if (item.kind !== kind || item.index !== position)
+        fail(`promptQueue.${kind} 顺序无效`);
+      string(item.text, "promptQueue.text", { max: MAX_TEXT_LENGTH });
+    }
+  };
+  validateItems(queue.steering, "steer");
+  validateItems(queue.followUp, "followUp");
+  if (queue.count !== queue.steering.length + queue.followUp.length)
+    fail("promptQueue.count 无效");
+}
 
 /** Validate a browser action before it reaches the extension bridge. @param {unknown} value @returns {any} */
 export function validateAction(value) {
@@ -215,6 +256,27 @@ export function validateAction(value) {
       // 按游标向前取更早的一段历史（首次快照只带最近若干轮）。
       keysOnly(action, ["type", "sessionId", "cursor"], "more_history");
       string(action.cursor, "cursor", { max: 512 });
+      break;
+    case "queue_add":
+      keysOnly(action, ["type", "sessionId", "kind", "text"], "queue_add");
+      if (!["steer", "followUp"].includes(action.kind)) fail("queue_add.kind 无效");
+      string(action.text, "queue_add.text", { max: MAX_TEXT_LENGTH });
+      break;
+    case "queue_remove":
+      keysOnly(action, ["type", "sessionId", "id", "revision"], "queue_remove");
+      string(action.id, "queue_remove.id", { max: 1024 });
+      if (!Number.isInteger(action.revision) || action.revision < 0)
+        fail("queue_remove.revision 无效");
+      break;
+    case "queue_update_item":
+      keysOnly(action, ["type", "sessionId", "id", "revision", "kind", "text"], "queue_update_item");
+      string(action.id, "queue_update_item.id", { max: 1024 });
+      if (!Number.isInteger(action.revision) || action.revision < 0)
+        fail("queue_update_item.revision 无效");
+      if (!["steer", "followUp"].includes(action.kind))
+        fail("queue_update_item.kind 无效");
+      string(action.text, "queue_update_item.text", { max: MAX_TEXT_LENGTH });
+      if (!action.text.trim()) fail("queue_update_item.text 不能为空");
       break;
     default:
       fail("action type 无效");
@@ -294,6 +356,9 @@ function validateField(key, value) {
     case "requests":
       if (!Array.isArray(value) || value.length > 64) fail("requests 必须是数组");
       for (const item of value) dialogRequest(item);
+      break;
+    case "promptQueue":
+      promptQueue(value);
       break;
     case "toolTimings":
     case "thinkingTimings":

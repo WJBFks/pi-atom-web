@@ -2,6 +2,7 @@ import { computed, defineComponent, h, onUnmounted, watch } from "vue";
 import { writeClipboard } from "../../clipboard.js";
 import { icon } from "../../icons.js";
 import { codeBlock } from "../../markdown.js";
+import { isAbortNotice } from "./abort-notice.js";
 import { useConversationClock } from "../../stores/conversation.js";
 import MarkdownContent from "./MarkdownContent.js";
 import DisclosureBlock from "./DisclosureBlock.js";
@@ -183,6 +184,16 @@ const resultContent = (result) => {
       return h("p", { key: index, class: "muted" }, "[图片内容]");
     return h("pre", { key: index }, JSON.stringify(block, null, 2));
   });
+}
+
+// 工具被中止（bash 被 Esc 打断等）时，宿主会把该工具的结果固定为
+// "Operation aborted"（Node 侧则可能是 "This operation was aborted"）。
+// 这类情况已由红色「已中断（：原因）」状态提示（横线）表达，
+// 工具卡里就不该再单独显示这段文本 —— 保留卡片（含命令/状态），输出置空。
+//
+// 保留 `isError` 前置条件：只对**错误结果**生效，避免误吞正常输出里的同名文本。
+export function isAbortedResult(result) {
+  return !!result?.isError && isAbortNotice(resultText(result));
 }
 
 // read/bash 的结果是原文（代码内容 / 终端输出），取文本块拼接，
@@ -583,8 +594,10 @@ export default defineComponent({
     );
     const genericOutput = () => {
       let body = null;
-      if (props.result) body = resultContent(props.result);
-      else if (props.running?.partialResult !== undefined)
+      if (props.result) {
+        if (isAbortedResult(props.result)) return null;
+        body = resultContent(props.result);
+      } else if (props.running?.partialResult !== undefined)
         body = [h(MarkdownContent, { text: text(props.running.partialResult) })];
       return h("section", { class: "tool-io-section tool-output-markdown" }, [
         h("div", { class: "tool-io-label" }, "Output"),
@@ -637,11 +650,13 @@ export default defineComponent({
         ]);
       }
       if (props.result)
-        return h(
-          "div",
-          { class: "tool-output-frame" },
-          resultContent(props.result),
-        );
+        return isAbortedResult(props.result)
+          ? null
+          : h(
+              "div",
+              { class: "tool-output-frame" },
+              resultContent(props.result),
+            );
       if (props.running?.partialResult !== undefined)
         return h("div", { class: "tool-output-frame" }, [
           h("pre", text(props.running.partialResult)),

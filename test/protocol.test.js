@@ -299,3 +299,38 @@ test("protocol accepts paged history prepends and the more_history cursor", () =
   assert.throws(() => validateAction({ ...action, limit: 10 }));
   assert.throws(() => validateAction({ ...action, cursor: 12 }));
 });
+
+test("protocol validates prompt queue snapshots, additions and guarded deletion", () => {
+  const promptQueue = {
+    revision: 4,
+    count: 2,
+    steering: [{ id: "steer:0:abc", kind: "steer", index: 0, text: "现在修正" }],
+    followUp: [{ id: "followUp:0:def", kind: "followUp", index: 0, text: "然后总结" }],
+  };
+  assert.equal(validateSnapshot({ ...snapshot, promptQueue }).promptQueue, promptQueue);
+  for (const kind of ["steer", "followUp"]) {
+    const action = { type: "queue_add", sessionId: "session-a", kind, text: "排队内容" };
+    assert.equal(validateAction(action), action);
+  }
+  const remove = {
+    type: "queue_remove",
+    sessionId: "session-a",
+    id: "steer:0:abc",
+    revision: 4,
+  };
+  assert.equal(validateAction(remove), remove);
+  const update = {
+    type: "queue_update_item",
+    sessionId: "session-a",
+    id: promptQueue.followUp[0].id,
+    revision: 2,
+    kind: "steer",
+    text: "转为引导并改写",
+  };
+  assert.equal(validateAction(update), update);
+  assert.throws(() => validateAction({ ...remove, revision: -1 }));
+  assert.throws(() => validateAction({ ...remove, id: "" }));
+  assert.throws(() => validateSnapshot({ ...snapshot, promptQueue: { ...promptQueue, count: 3 } }));
+  assert.throws(() => validateAction({ ...update, kind: "later" }));
+  assert.throws(() => validateAction({ ...update, text: "" }));
+});

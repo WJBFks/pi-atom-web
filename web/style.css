@@ -12,9 +12,230 @@
 
 .disclosure-block{overflow:hidden}.disclosure-block>summary{position:relative;white-space:nowrap}.disclosure-block>.disclosure-body{min-width:0}.disclosure-summary-row{display:inline-flex;width:calc(100% - 10px);min-width:0;align-items:baseline;gap:8px;vertical-align:bottom}.disclosure-summary-row strong{flex:none;font-weight:400}.disclosure-meta{flex:none;color:var(--muted);font-size:10px}.disclosure-preview{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--summary-preview)}.disclosure-block[open] .disclosure-preview,.custom-entry-block:not([open]) .disclosure-meta{display:none}.notification-block,.custom-entry-block{padding:0;background:var(--bg)}.notification-block>summary,.custom-entry-block>summary{display:list-item;padding:7px 12px;color:var(--muted)}.notification-block .notification-text{padding:0 12px 11px}.custom-entry-rendered{max-height:none;margin:0;padding:0 12px 11px;border:0;background:transparent;white-space:pre-wrap;font:inherit}.custom-entry-raw{margin:0 12px 11px;padding:0;background:transparent}.custom-entry-raw>summary{padding:5px 8px;font-size:10px}.custom-entry-data{padding:0 12px 11px}.custom-entry-data>.code-block{margin:0}
 
-#plugin-requests:empty{display:none}#plugin-requests{max-height:45dvh;overflow:auto;margin-bottom:10px;padding:16px;background:var(--panel);border:1px solid var(--border);border-radius:12px}.plugin-request{max-width:804px;margin:auto}.plugin-request p{white-space:pre-wrap}.request-options{margin:12px 0}.request-options button{display:block;width:100%;text-align:left;white-space:pre-wrap;font:12px/1.6 ui-monospace,monospace;border:0;border-radius:0}.plugin-request small{margin-left:12px;color:var(--muted)}
+/* 活动组件栏：输入卡上方的一排活动组件 tab（像浏览器标签页）。
+   与输入卡相邻（无间隙），左右各内缩 30px。
+   栏自身**不画背景/边框**，颜色全部由每个 tab 的配色决定（tone 由组件内联传入，
+   所以这里不写具体色值）；展开的大框头部用同一个 tone，主体保持 --bg 以保证内容可读。 */
+/* 层叠：输入卡是 .compose-wrap 里靠后的兄弟节点且有 position:relative，会盖住 tab 行，
+   所以要把整条活动栏（而不只是某个 tab）抬到卡片之上，选中标签的 2px 下边框才可见。 */
+.activity-bar{position:relative;z-index:2;margin:0;/* 左右内缩由内部两个子项各自提供（.activity-tabs / .activity-panel），
+   栏自身不缩 —— 否则展开态会被父级缩一次、面板再缩一次（双倍），与折叠态对不上。 */
+/* 允许被 dock 压缩，并把有界高度传给内部面板 */
+flex:0 1 auto;min-height:0;display:flex;flex-direction:column}
+/* tab 行：紧凑的一排，底部与输入卡上沿紧贴（不留缝）。 */
+/* tab 行：紧凑的一排，间距为 0，底部与输入卡上沿紧贴（不留缝）。 */
+.activity-tabs{display:flex;align-items:flex-end;gap:0;min-height:0;padding:0;overflow-x:auto;margin:0 var(--activity-margin)}
+/* 折叠态 tab 行的左右缩进与大框一致：都由 .activity-bar 的 --activity-inset 提供，
+   两态下 tab 的左缘因此完全对齐（不再有 2px 的 padding 偏差）。 */
+/* 每个 tab 自带背景与边框，下沿敞开贴着输入卡，像一排从输入卡里升起来的标签：
+   只有**最左**的 tab 保留左上圆角、**最右**的保留右上圆角，中间与其余角一律直角。
+   tone 由组件以 --tone-color/-bg/-border 内联下发；**未激活一律用默认背景/文字/边框**，
+   只有激活（当前展示）的那个才换成该 tone 的配色；边框粗细始终一致。 */
+.activity-tab{
+  --tone-color:var(--muted);--tone-bg:var(--panel);--tone-border:var(--border);
+  position:relative;display:flex;align-items:center;flex:0 1 auto;min-width:0;border:1px solid var(--border);
+  border-radius:0;
+  /* 未激活：默认背景 + 默认文字 + 默认边框（tone 只在激活时出现） */
+  border-color:var(--border);
+  background:var(--bg);
+  color:var(--text);
+}
+/* 每个 tab 都保留完整的左右边框（相邻两个之间就是一条 1px 线）。 */
+.activity-tab:first-child{border-top-left-radius:7px}
+/* 展开态下最小化按钮排在最后，所以“最后一个 tab”要单独判定 */
+.activity-tab:last-child,.activity-tabs-in-panel>.activity-tab:last-of-type{border-top-right-radius:7px}
+/* 未激活时的 hover：默认背景 + 该 tag 的字体颜色 */
+.activity-tab:not(.is-active):hover{background:var(--bg);color:var(--tone-color)}
+/* 已激活时的 hover：维持现状（底色向该 tone 的主色微染）。
+   限度说明：底色已经很浅，纯染底色再深会拉低文字对比，6% 已接近上限。 */
+.activity-tab.is-active:hover{background:color-mix(in srgb,var(--tone-bg) 94%,var(--tone-color))}
+/* 激活态：背景、文字与边框都用该 tone 的配色（粗细仍与其它 tab 一致） */
+.activity-tab.is-active{
+  background:var(--tone-bg);color:var(--tone-color);border-color:var(--tone-border);
+}
+.activity-tab>button[role=tab]{display:flex;align-items:center;gap:5px;min-width:0;max-width:220px;padding:0 8px;height:26px;border:0;border-radius:0;background:transparent;color:inherit;font-size:11px;cursor:pointer}
+.activity-tab-icon{display:inline-flex;flex:none;color:inherit}
+.activity-tab-icon>.ui-icon{display:block;width:13px;height:13px}
+.activity-tab-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.activity-tabs>button:focus-visible,.activity-panel-head>button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+/* 大框：与输入卡相邻（向上展开）。
+   注意：**上边框交给 tab 行**（tab 自带 tone 边框），面板自身只画左右下三边；
+   否则左上角会同时出现“面板的上边框”和“第一个 tab 的左边框”两条并排的线。 */
+.activity-panel{
+  /* --tone-* 由组件内联传入（当前激活 tab 的 tone）；未传时退回中性色 */
+  --tone-bg:var(--panel);--tone-border:var(--border);
+  /* 上面两角圆角（外层框的观感），下方两角直角（大框下沿直接贴着输入卡）。
+     overflow:hidden 让内部的 tab 行跟着这个圆弧被裁切，tab 自身的直角就不会戳出圆角。 */
+  /* 整块大框（外框 + 内容区那一圈）一律中性 --border，只有 tab 自身用 tone 配色。 */
+  margin-top:-1px;border:1px solid var(--border);border-top:0;border-radius:8px 8px 0 0;
+  background:var(--bg);overflow:hidden;
+  /* 四边阴影：向左/右/下与… 四周铺开，让大框像一块浮起来的弹窗。
+     上方那圈由 tab 行遮住，所以阴影上缘不会露出来。 */
+  box-shadow:0 -2px 14px #00000014,0 4px 22px #0000001f,0 0 0 1px #00000005;
+  /* 大框左右比输入卡向内缩一段（折叠态的 tab 行用同一个值，两态左缘严格对齐）。 */
+  margin-left:var(--activity-margin);margin-right:var(--activity-margin);
+  /* 作为 flex 子项可收缩，并把高度继续传给内容区 */
+  display:flex;flex-direction:column;flex:0 1 auto;min-height:0;
+}
+/* 展开态：所有 tab 一起升到大框顶部的这一行（与收起态共用 tab 外观），
+   末尾追加最小化按钮。
+   目标：**只显示 tab 自己的边框**，整条顶边连续，且上面两角随大框一起是圆角。
+   - 行左右各外扩 1px：抵消面板的左右边框，使首个 tab 的左边框正好压在上面（只有一条线）。
+   - 行自身只画一条上边框（整宽），tab 不再各自画上边框 —— 两条错开就会出现顶边断裂。
+   - 圆角由外层 .activity-panel 提供，行本身不设圆角，靠 overflow 裁切成形。 */
+.activity-tabs-in-panel{
+  display:flex;align-items:stretch;gap:0;flex-wrap:nowrap;
+  position:relative;margin:0 -1px;padding:0;min-height:30px;background:transparent;
+  border-top:1px solid var(--border);border-radius:7px 7px 0 0;
+}
+/* tab 自身不画上边框（整条顶边由行统一画，见上） */
+.activity-tabs-in-panel>.activity-tab{border-top:0}
+/* 分割线画在**行**上（一条整宽的绝对定位线，铺到右边缘、包含最小化按钮那段），
+   否则逐块拼接时线只会画到按钮左侧就停。 */
+.activity-tabs-in-panel::after{
+  content:"";position:absolute;left:0;right:0;bottom:0;height:1px;
+  background:var(--border);pointer-events:none;
+}
+/* 当前展示的 tab：把它的那一段分割线盖掉（与大框内容区连成一体）。
+   用与 tab 同色的覆盖块盖住，而不是给 tab 加下边框 —— 这样线仍是整条，
+   不会在按钮处断开。 */
+.activity-tabs-in-panel>.activity-tab.is-active::after{
+  content:"";position:absolute;left:0;right:-1px;bottom:0;height:1px;
+  background:var(--tone-bg);
+}
+/* 行内末尾的空白（最小化按钮左侧）：撑开剩余宽度让按钮贴右 */
+.activity-tabs-in-panel::before{
+  content:"";flex:1 1 auto;order:1;
+}
+.activity-tabs-in-panel>.activity-tab{order:0}
+.activity-tabs-in-panel>.activity-panel-collapse{order:2;align-self:center;margin:0 6px 0 0}
+.activity-panel-collapse{display:inline-flex;align-items:center;justify-content:center;flex:none;width:22px;height:22px;margin:0 0 0 auto;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted);opacity:.65;cursor:pointer}
+.activity-panel-collapse:hover{background:#00000014;opacity:1}
+.activity-panel-collapse>.ui-icon{display:block;width:13px;height:13px}
+html.dark .activity-panel-collapse:hover{background:#ffffff1f}
+/* 深色主题：tone 是为浅色底设计的，直接用在深色页面上会变成刺眼亮块，且文字对比不足。
+   底色只用 12% 的 tone（与页面底对比 1.4，仅作微弱区分），文字用 tone 提亮到 50% 白，
+   实测文字/底色对比 ≈ 6.1:1。两个主题共用同一份 tone 色值，不写死第二套。 */
+/* 大框边框在深色下同样保持中性，与内部各分割线一致（不再随 tone 偏色）。 */
+/* （.activity-panel 与 .activity-panel-body 都用 --border，无需主题覆盖） */
+/* 深色下 tone 是为浅色底设计的：底色压到 12%、文字提亮到 50% 白（对比 ≈ 6.1:1）。
+   未激活同样用「默认背景 + 默认文字」，tone 只在激活/hover 时出现。 */
+/* 未激活：默认边框（深色下沿用 --border） */
+html.dark .activity-tab{border-color:var(--border)}
+html.dark .activity-tab.is-active{
+  background:color-mix(in srgb,var(--tone-bg) 12%,var(--bg));
+  color:color-mix(in srgb,var(--tone-color) 50%,#fff);
+  border-color:color-mix(in srgb,var(--tone-border) 30%,var(--border));
+}
+/* 未激活 hover：默认背景 + 该 tag 的字体颜色（深色下提亮到能读） */
+html.dark .activity-tab:not(.is-active):hover{
+  background:var(--bg);color:color-mix(in srgb,var(--tone-color) 55%,#fff);
+}
+/* 已激活 hover：维持现状（底色略提） */
+html.dark .activity-tab.is-active:hover{background:color-mix(in srgb,var(--tone-bg) 20%,var(--bg))}
+/* 内容区：只有它这一圈用当前激活 tab 的 tone 配色。
+   margin:-1px 让它的边框与面板外框重合（不产生第二条线），
+   上边不画（那里是分割线）。 */
+/* 内容区：只有它这一圈用当前激活 tab 的 tone 配色。
+   margin:-1px 让它的边框与面板外框重合（不产生第二条线），上边不画（那里是分割线）。
 
-#plugin-requests pre{max-height:none;overflow:visible;white-space:pre-wrap;overflow-wrap:anywhere}
+   注意高度：这里必须给一个**确定的高度**（而非只有 max-height）。
+   仅有 max-height 时，内部 `flex:1 1 auto` 的滚动子项会按内容高度解析，
+   于是撑到整段内容那么高 —— 表现为「完全不能滚动、底栏被顶到看不见」。
+   用 height + max-height 配合（上限 40dvh），内部才拿到有界的可用高度。 */
+.activity-panel-body{
+  /* 竖向 flex：内容是一个可滚动的 stretch 子项。
+     若用默认的 row，子项的 flex-basis:auto 会按**宽度**解析，高度完全不受约束，
+     表现为子项按内容长高、溢出面板（看起来就是“不能滚动”）。
+     边框统一为中性 --border：这一圈与外框是同一条 1px 线，
+     若这里改用 tone 色，同一条线会在内容区开始处从灰变紫（看起来像两套边框）。 */
+  display:flex;flex-direction:column;flex:1 1 auto;min-height:0;max-height:40dvh;margin:0 -1px -1px;
+  border:1px solid var(--border);border-top:0;
+}
+.activity-panel-body:empty{display:none}
+/* 非当前的请求内容体：隐藏但保持挂载（display:none 不销毁组件状态），
+   所以切换 tab / 折叠后再次展开时，表单草稿与终端实例都还在。
+
+   高度续接：这些宿主在大框之外，用 0 高度 + hidden 避免占位。 */
+.activity-panel-host{height:0;overflow:hidden}
+.prompt-queue-panel{display:flex;flex-direction:column;min-height:0;max-width:804px;width:100%;margin:auto}
+.prompt-queue-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:9px 12px 7px;border-bottom:1px solid var(--border)}
+.prompt-queue-head>span{font-size:11px;text-align:right}
+.prompt-queue-lists{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;min-height:0;overflow:auto;padding:10px 12px}
+.prompt-queue-group-head{display:flex;align-items:baseline;gap:7px;min-width:0;margin:0 0 6px;font-size:12px;white-space:nowrap}
+.prompt-queue-count{min-width:20px;padding:0 5px;border-radius:10px;background:var(--panel);color:var(--muted);text-align:center;font-weight:400}
+.prompt-queue-description{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:10px;font-weight:400;line-height:1.45}
+.prompt-queue-group ol{display:grid;gap:5px;margin:0;padding:0;list-style:none}
+.prompt-queue-group li{display:flex;align-items:flex-start;gap:6px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;background:var(--bg)}
+.prompt-queue-group li.is-editing{display:block}
+.prompt-queue-text{flex:1;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.prompt-queue-item-actions{display:flex;align-items:center;gap:3px;flex:none}
+.prompt-queue-item-actions>button{height:24px;padding:0 6px;border-color:transparent;background:transparent;color:var(--muted);font-size:10px;white-space:nowrap}
+.prompt-queue-item-actions>button:hover{color:var(--text);background:var(--hover)}
+.prompt-queue-icon-button{display:grid;place-items:center;width:24px;padding:0!important}
+.prompt-queue-icon-button>.ui-icon{width:13px;height:13px}
+.prompt-queue-editor{display:grid;gap:6px;width:100%}
+.prompt-queue-editor textarea{min-height:46px;max-height:110px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);resize:vertical}
+.prompt-queue-editor-actions{display:flex;justify-content:flex-end;gap:5px}
+.prompt-queue-editor-actions button{padding:3px 7px;font-size:10px}
+.prompt-queue-empty{margin:0;font-size:11px}
+@media(max-width:760px){.prompt-queue-head{align-items:flex-start;flex-direction:column}.prompt-queue-head>span{text-align:left}.prompt-queue-group li:not(.is-editing){flex-wrap:wrap}.prompt-queue-item-actions{width:100%;justify-content:flex-end}}
+/* 扩展请求（通用形式）：顶部标题行与底部操作栏固定，仅正文滚动。
+   三段都是一个 flex 列的成员：标题/底栏 flex:none，正文 flex:1 + overflow:auto。
+   min-height:0 必须保留，否则 flex 子项默认最小尺寸会撑破父级、再次压掉滚动。 */
+.plugin-request{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;max-width:804px;margin:auto;width:100%}
+/* 头部有自己的下边框（与滚动区分隔），底部操作栏同理 —— 两处各一条分割线。 */
+.plugin-request-head{flex:none;padding:9px 12px 7px;border-bottom:1px solid var(--border)}
+.plugin-request-head .role{margin-bottom:2px}
+.plugin-request-head>strong{display:block;font-weight:600}
+.plugin-request-body{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 12px}
+.plugin-request-foot{flex:none;display:flex;align-items:center;gap:8px;padding:6px 12px;border-top:1px solid var(--border);background:var(--bg)}
+.plugin-request-body p{white-space:pre-wrap}
+.request-options{margin:12px 0}
+.request-options button{display:block;width:100%;text-align:left;white-space:pre-wrap;font:12px/1.6 ui-monospace,monospace;border:0;border-radius:0}
+/* 底栏按钮与说明都收小：这里是次要操作，不应抢正文的视觉重量。 */
+.plugin-request-foot button{padding:3px 9px;font-size:11px}
+.plugin-request-foot small{margin-left:0;color:var(--muted);font-size:11px}
+/* 状态提示：一条贯穿的分割线，文字居中压在线上
+   （`-----命令：/piolium-help-----` 的观感）。线是 CSS 画的，不是减号字符。
+   承载命令、模型/思考级别变更、以及被中止三类。 */
+/* 状态提示（命令 / 模型切换 / 已中断）：左右两段线 + 居中文字，
+   形如 `-----命令：/piolium-help-----`。线会被文字挤短，这是预期的。
+   **线要稳定 1px**：不能用 `position:absolute;top:50%` —— 行高为奇数时
+   50% 落在半个设备像素上，1px 会被渲染成 2px（同一页里时粗时细）。
+   改成 flex 行内的实心块：高度由自身决定，不参与半像素定位。 */
+.command-rule{display:flex;align-items:center;gap:10px;margin:10px 0;min-width:0}
+.command-rule-line{flex:1 1 0;height:1px;min-width:12px;background:var(--border)}
+.command-rule-body{display:inline-flex;align-items:center;gap:5px;flex:0 1 auto;max-width:min(100%,680px);color:var(--muted);font-size:11px}
+.command-rule-label{white-space:nowrap}
+/* 行内的命令名/取值：与周围文字同款，**不加 --panel 底与描边**。
+   带面板框的代码样式只出现在 hover 浮层里的全文那一行（.command-rule-tip-full）。 */
+.command-rule-code{font-family:inherit;font-size:inherit;white-space:nowrap}
+.command-rule-info-wrap{position:relative;display:inline-flex;align-items:center}
+/* 圆圈感叹号：hover 弹自定义浮层（两行），点击复制（图标随之变成对勾） */
+.command-rule-info{display:inline-flex;align-items:center;justify-content:center;flex:none;width:16px;height:16px;padding:0;border:0;border-radius:50%;background:transparent;color:inherit;opacity:.6;cursor:pointer}
+.command-rule-info:hover,.command-rule-info:focus-visible{opacity:1;background:var(--hover);color:var(--text)}
+.command-rule-info>.ui-icon{display:block;width:13px;height:13px}
+/* 自定义浮层：不用系统 title（样式不可控、有延迟），自己画。
+   第一行全文（可换行），第二行是操作提示。 */
+.command-rule-tip{position:absolute;z-index:9;left:50%;bottom:calc(100% + 7px);transform:translateX(-50%);display:flex;flex-direction:column;gap:3px;width:max-content;max-width:min(560px,70vw);padding:6px 10px;border:1px solid var(--border);border-radius:7px;background:var(--bg);box-shadow:0 8px 24px #0000001f;color:var(--text);font-size:11px;line-height:1.5;pointer-events:none;white-space:pre-wrap;overflow-wrap:anywhere}
+.command-rule-tip-full{align-self:stretch;padding:2px 6px;border:1px solid var(--border);border-radius:5px;background:var(--panel);font-family:inherit;overflow-wrap:anywhere}
+.command-rule-tip-hint{color:var(--muted);font-size:10px}
+/* 模型被终止（用户中断 / 模型或工具报错）：文字与分割线都用红色。 */
+.command-rule-interrupted,
+.command-rule-interrupted .command-rule-body{color:var(--tool-failure)}
+.command-rule-interrupted .command-rule-line{background:var(--tool-failure)}
+.command-rule-interrupted .command-rule-info:hover{color:var(--tool-failure);background:color-mix(in srgb,var(--tool-failure) 12%,transparent)}
+.command-rule-interrupted .command-rule-tip-hint{color:var(--tool-failure)}
+
+/* 会话被活动组件阻塞时的提示条：红底白字、水平居中，**浮动在输入框中间**。
+   绝对定位 + 不占文档流：输入卡高度与 --compose-height 都不受影响。
+   `top:50%` 相对输入卡（#composer 是 position:relative）垂直居中，
+   再左移自身一半做水平居中。 */
+.session-blocked{position:absolute;z-index:5;left:50%;top:50%;transform:translate(-50%,-50%);max-width:calc(100% - 24px);padding:5px 12px;border-radius:6px;text-align:center;color:var(--tool-failure);font-size:11px;background:color-mix(in srgb,var(--tool-failure) 12%,var(--bg));border:1px solid color-mix(in srgb,var(--tool-failure) 45%,transparent);box-shadow:0 4px 14px #0000001f;pointer-events:none}
+/* 活动名：红字 + 同色淡描边，不用白底也不用深色块。 */
+.session-blocked code{font-family:inherit;font-size:.94em;padding:0 4px;border:1px solid color-mix(in srgb,var(--tool-failure) 42%,transparent);border-radius:4px;background:color-mix(in srgb,var(--tool-failure) 8%,var(--bg));color:var(--tool-failure)}
+
 
 .terminal-host{position:relative;width:100%;overflow:hidden;margin:12px 0;background:#252a33}.terminal-screen{position:absolute;left:0;top:0;transform-origin:top left}.terminal-screen .xterm-viewport{overflow:hidden!important}.terminal-hint{color:var(--muted);font-size:11px}.terminal-host:focus-within{outline:2px solid var(--accent);outline-offset:2px}
 
@@ -33,9 +254,39 @@
 .tool-block>summary{display:list-item;padding:7px 12px;white-space:nowrap}.tool-title{display:inline-flex;align-items:baseline;gap:8px;max-width:calc(100% - 76px);vertical-align:bottom;color:var(--muted)}.tool-title strong{flex:none;font-weight:400}.tool-title span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--summary-preview)}.tool-duration{float:right;font-size:10px;font-weight:650}.duration-expanded{display:none}.tool-block[open] .duration-collapsed{display:none}.tool-block[open] .duration-expanded{display:inline}.tool-body{padding:0 12px 11px}.tool-io-section+.tool-io-section{margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}.tool-io-label{margin:0 0 4px;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px}.tool-block pre{max-height:500px;margin:0;padding:10px 12px;background:var(--bg);font:inherit}.tool-block pre.tool-input{overflow:auto;white-space:pre;overflow-wrap:normal}.tool-block code{font-family:inherit}.tool-output-frame{max-height:500px;padding:10px 12px;overflow:auto;border:1px solid var(--border);border-radius:7px;background:var(--bg)}.tool-output-frame>:first-child{margin-top:0}.tool-output-frame>:last-child{margin-bottom:0}.tool-output-frame pre{max-height:none;padding:0;border:0;background:transparent;overflow:visible}.tool-waiting{margin:5px 0 0;color:var(--muted);font-size:11px}.tool-block:not([open]) .tool-body{display:none}
 
 /* The toolbar stays fixed; messages scroll behind a bottom dock for requests and input. */
-html,body{height:100%;overflow:hidden}.layout{height:100dvh;min-height:0;align-items:stretch}main{position:relative;min-height:0}#scroll{flex:1;min-height:0;overflow:auto;scroll-behavior:smooth}#messages,.compose-wrap{width:100%;max-width:var(--content-width,860px);margin-left:auto;margin-right:auto;padding-left:28px;padding-right:28px}#messages{min-height:100%;padding-top:30px;padding-bottom:calc(var(--compose-height,174px) + 20px)}.compose-wrap{position:absolute;z-index:4;left:calc(50% - var(--scrollbar-width,0px)/2);bottom:0;transform:translateX(-50%);max-height:calc(100% - 12px);padding-top:12px;padding-bottom:14px;background:linear-gradient(to bottom,transparent 0,var(--bg) 12px,var(--bg) 100%)}#plugin-requests{max-height:calc(100dvh - 59px - 190px);overflow:auto}
+html,body{height:100%;overflow:hidden}.layout{height:100dvh;min-height:0;align-items:stretch}main{position:relative;min-height:0}#scroll{flex:1;min-height:0;overflow:auto;scroll-behavior:smooth}#messages,.compose-wrap{width:100%;max-width:var(--content-width,860px);margin-left:auto;margin-right:auto;padding-left:28px;padding-right:28px}#messages{min-height:100%;padding-top:30px;padding-bottom:calc(var(--compose-height,174px) + 20px)}.compose-wrap{--dock-pad:28px;position:absolute;z-index:4;left:calc(50% - var(--scrollbar-width,0px)/2);bottom:0;transform:translateX(-50%);max-height:calc(100% - 12px);padding-top:12px;padding-bottom:14px;/* 竖排 flex：输入卡按内容占位（不压缩）。 */
+display:flex;flex-direction:column}
+/* 活动组件浮层：不占 dock 高度，自身无背景，能透视下层滚动的消息。
+   输入卡（#composer）与状态栏各自有自己的背景，不受影响。 */
+.dock-overlay{/* 活动组件比输入卡每侧额外内缩的距离（提示条与大框共用同一份）。 */
+--activity-inset:30px;--activity-margin:calc(var(--dock-pad,28px) + var(--activity-inset));
+position:absolute;left:0;right:0;bottom:100%;z-index:3;display:flex;flex-direction:column;/* 面板下沿紧贴输入卡上沿：dock 的 padding-top 12px 会顶开一条缝，这里抵消掉。 */margin-bottom:-12px;max-height:calc(100dvh - 120px - var(--safe-area-top,0px));
+  /* 浮层罩住的区域不吃滚轮：滚轮在这里滚到底/顶时，不会穿透到主会话的 #scroll。
+     内部真正需要滚动的容器（.ask-content / .plugin-request-body 等）
+     各自设了 overflow:auto，它们自己的滚动照常工作。 */
+  overscroll-behavior:contain}
+/* 活动组件各层同样阻断穿透：空白间隙处滚轮也不落到主会话上。 */
+.activity-bar,.activity-tabs,.activity-panel,.activity-panel-body,.activity-tabs-in-panel{overscroll-behavior:contain}
+
+/* 展开 / 折叠的进出场过渡：
+   大框从 0 高度长到实际高度并淡入，折叠态的 tab 行同样淡入。
+   不用 transform:scaleY —— 那会把内部文字纵向压扁；走 max-height + opacity。
+   也不改用 display:none 切换（会丢掉表单草稿），隐藏仍由 .activity-panel-host 负责。 */
+@keyframes activity-panel-in{from{max-height:0;opacity:0}to{max-height:var(--activity-panel-max,48dvh);opacity:1}}
+/* 退场：'.is-closing' 由组件在折叠时挂上，播完（160ms）才真正卸载。
+   与进场对称，走 max-height + opacity，避免文字被压扁。 */
+@keyframes activity-panel-out{from{max-height:var(--activity-panel-max,48dvh);opacity:1}to{max-height:0;opacity:0;box-shadow:none}}
+
+@keyframes activity-tabs-in{from{max-height:0;opacity:0}to{max-height:34px;opacity:1}}
+.activity-panel{animation:activity-panel-in 180ms ease-out}
+.activity-panel.is-closing{animation:activity-panel-out 160ms ease-in forwards;pointer-events:none}
+.activity-tabs{animation:activity-tabs-in 140ms ease-out}
+/* 非当前的面板是隐藏的宿主，不参与动画（避免它的高度变化影响布局）。 */
+.activity-panel-host>.activity-panel-body{animation:none}
+@media(prefers-reduced-motion:reduce){.activity-panel,.activity-tabs,.activity-panel.is-closing{animation:none}}
+.activity-bar{transition:opacity 140ms ease-out}
 #jump-to-bottom{position:absolute;z-index:6;left:calc(50% - var(--scrollbar-width,0px)/2);bottom:calc(var(--compose-height,174px) - 18px);width:36px;height:36px;padding:0;border-radius:50%;display:grid;place-items:center;transform:translateX(-50%);background:var(--bg);box-shadow:0 4px 16px #0002;color:var(--muted)}#jump-to-bottom:hover{color:var(--accent);background:var(--hover)}#jump-to-bottom .ui-icon{width:17px;height:17px}
-@media(max-width:760px){#messages,.compose-wrap{padding-left:18px;padding-right:18px}.compose-wrap{padding-bottom:12px}}
+@media(max-width:760px){#messages,.compose-wrap{padding-left:18px;padding-right:18px}.compose-wrap{--dock-pad:18px;padding-bottom:12px}}
 
 .body h1,.body h2,.body h3,.body h4{line-height:1.35;margin:1.25em 0 .55em}.body h1{font-size:1.55em}.body h2{font-size:1.35em}.body h3{font-size:1.18em}.body blockquote{margin:12px 0;padding:2px 14px;border-left:3px solid var(--accent);color:var(--muted);background:var(--panel)}.body hr{border:0;border-top:1px solid var(--border);margin:20px 0}.body li+li{margin-top:3px}.body input[type=checkbox]{accent-color:var(--accent)}
 .code-block{margin:10px 0;border:1px solid var(--border);border-radius:8px;background:var(--panel);overflow:hidden;font:12px/1.65 var(--font-mono)}.code-header{height:34px;display:flex;align-items:center;gap:10px;padding:0 8px 0 12px;border-bottom:1px solid var(--border);background:var(--bg);color:var(--muted);font-size:10px;text-transform:lowercase}.code-header span+span{padding-left:10px;border-left:1px solid var(--border)}.code-copy{margin-left:auto;padding:2px 8px;border-color:transparent;background:transparent;font-size:10px;color:var(--muted)}.code-copy:hover{color:var(--text);background:var(--hover)}.code-scroll{display:grid;grid-template-columns:auto minmax(max-content,1fr);max-height:500px;overflow:auto;background:var(--bg)}.code-block pre,.body .code-block pre,details .code-block pre{max-height:none;margin:0;padding:10px 12px;border:0;border-radius:0;background:transparent;overflow:visible;white-space:pre;overflow-wrap:normal;font:inherit}.code-block .code-lines{position:sticky;left:0;z-index:1;min-width:42px;padding-right:10px;text-align:right;color:var(--muted);border-right:1px solid var(--border);background:var(--panel);user-select:none}.code-source{min-width:100%}.code-source code{font:inherit;color:var(--text)}.hljs-comment,.hljs-quote{color:#7a8791;font-style:italic}.hljs-keyword,.hljs-selector-tag,.hljs-literal,.hljs-type{color:#8959a8}.hljs-string,.hljs-regexp,.hljs-addition,.hljs-attribute{color:#718c00}.hljs-number,.hljs-symbol,.hljs-bullet{color:#f5871f}.hljs-title,.hljs-section,.hljs-function .hljs-title{color:#4271ae}.hljs-variable,.hljs-template-variable,.hljs-selector-id,.hljs-selector-class{color:#c82829}.hljs-built_in,.hljs-name,.hljs-meta{color:#3e999f}.hljs-deletion{color:#c82829;background:#ffd7d5}.hljs-addition{background:#e6ffdf}html.dark .hljs-comment,html.dark .hljs-quote{color:#8b949e}html.dark .hljs-keyword,html.dark .hljs-selector-tag,html.dark .hljs-literal,html.dark .hljs-type{color:#ff7b72}html.dark .hljs-string,html.dark .hljs-regexp,html.dark .hljs-addition,html.dark .hljs-attribute{color:#a5d6ff}html.dark .hljs-number,html.dark .hljs-symbol,html.dark .hljs-bullet{color:#79c0ff}html.dark .hljs-title,html.dark .hljs-section,html.dark .hljs-function .hljs-title{color:#d2a8ff}html.dark .hljs-variable,html.dark .hljs-template-variable,html.dark .hljs-selector-id,html.dark .hljs-selector-class{color:#ffa657}html.dark .hljs-built_in,html.dark .hljs-name,html.dark .hljs-meta{color:#7ee787}html.dark .hljs-deletion{color:#ffdcd7;background:#67060c}html.dark .hljs-addition{color:#aff5b4;background:#033a16}
@@ -50,7 +301,7 @@ html,body{height:100%;overflow:hidden}.layout{height:100dvh;min-height:0;align-i
 @media(max-width:760px){#session-info-popover{display:none}}
 
 /* Keep the status row close to the composer with equal vertical breathing room. */
-.compose-wrap{padding-bottom:0}.status-shell{padding:6px 0}.status-bar{min-height:26px;padding:0}.status-bar button{min-height:22px;padding:2px 7px}.status-bar button span{color:inherit}
+.compose-wrap{padding-bottom:0}.status-shell{margin:0 calc(var(--dock-pad,28px) * -1);padding:6px var(--dock-pad,28px);background:var(--bg)}.status-bar{min-height:26px;padding:0}.status-bar button{min-height:22px;padding:2px 7px}.status-bar button span{color:inherit}
 @media(max-width:760px){.compose-wrap{padding-bottom:0}}
 
 #composer{position:relative}.composer-setting{display:inline-flex;align-items:center;gap:6px;padding:6px 8px;border-color:transparent;background:transparent;color:var(--muted);font-size:11px}.composer-setting:hover,.composer-setting[aria-expanded=true]{background:var(--hover);color:var(--text)}.composer-setting .ui-icon{width:14px;height:14px}.setting-picker{position:absolute;z-index:14;right:12px;bottom:62px;width:min(650px,calc(100vw - 40px));height:min(450px,calc(100dvh - 190px));border:1px solid var(--border);border-radius:12px;background:var(--bg);box-shadow:0 14px 38px #0002;overflow:hidden}.model-providers,.model-list{display:flex;flex-direction:column;min-width:0;height:100%;overflow:auto}.model-providers{position:absolute;inset:0 auto 0 0;width:38%;border-right:1px solid var(--border)}.model-list{margin-left:38%;padding-bottom:8px}.model-providers>strong,.model-list>strong,.thinking-picker>strong{display:block;flex:none;padding:14px 18px;text-align:center}.setting-picker button{display:flex;align-items:center;gap:8px;width:100%;padding:9px 16px;border:0;border-radius:0;text-align:left;background:transparent;color:var(--muted)}.setting-picker button:hover{background:var(--hover);color:var(--text)}.setting-picker button.selected{background:color-mix(in srgb,var(--accent) 18%,var(--bg));color:var(--text);font-weight:600}.setting-picker button .ui-icon{width:14px;height:14px;color:var(--accent)}.model-providers .show-all{margin-top:auto;border-top:1px solid var(--border);justify-content:center}.model-list input{flex:none;margin:0 10px 5px;padding:8px 10px;border:1px solid var(--border);border-radius:7px;background:var(--bg);color:var(--text);font:inherit;outline:0}.model-list input:focus{border-color:var(--accent)}.thinking-picker{right:12px;width:220px;height:auto;max-height:calc(100dvh - 190px);overflow:auto;padding-bottom:8px}.thinking-picker button.selected{color:var(--accent)}

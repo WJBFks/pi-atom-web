@@ -431,10 +431,11 @@ test("generic request shows explanation and can cancel without an undefined prot
     ],
   });
   await open(page, web);
-  await expect(page.locator("#plugin-requests")).toContainText(
+  // 扩展请求现在展示在活动组件大框里（#plugin-requests 容器已移除）
+  await expect(page.locator(".activity-panel:visible")).toContainText(
     "这是需要用户确认的正文",
   );
-  await page.locator('[data-reply="cancel"]').click();
+  await page.locator('.activity-panel:visible [data-reply="cancel"]').click();
   await expect.poll(() => web.actions.length).toBe(1);
   expect(web.actions[0]).toEqual({
     type: "dialog_response",
@@ -1340,6 +1341,8 @@ test("submitted prompt appears before model response and delayed waiting status 
   await page.locator("#prompt").fill("需要立即显示的消息");
   await page.locator("#send").click();
 
+  await expect(page.locator("#prompt")).toHaveValue("", { timeout: 100 });
+
   await expect(page.locator("#message-live .message.user")).toContainText(
     "需要立即显示的消息",
     { timeout: 150 },
@@ -1369,6 +1372,35 @@ test("submitted prompt appears before model response and delayed waiting status 
     { timeout: 150 },
   );
   await expect(page.locator("#message-live .message.user")).toHaveCount(0);
+  await expect(page.locator("#prompt")).toHaveValue("失败时撤销的消息");
+});
+
+test("busy prompt clears immediately and appears only in the follow-up queue", async ({
+  page,
+  web,
+}) => {
+  const queue = { revision: 0, count: 0, steering: [], followUp: [] };
+  web.setSnapshot({ busy: true, pending: false, promptQueue: queue });
+  web.setActionHandler(async (action, server) => {
+    if (action.type !== "send") return {};
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    queue.revision += 1;
+    queue.count = 1;
+    queue.followUp = [
+      { id: "followUp:0:busy", kind: "followUp", index: 0, text: action.text },
+    ];
+    server.publish({ pending: true, promptQueue: structuredClone(queue) });
+    return { delivery: "queued" };
+  });
+  await open(page, web);
+  await page.locator("#prompt").fill("只进入排队的消息");
+  await page.locator("#send").click();
+
+  await expect(page.locator("#prompt")).toHaveValue("", { timeout: 100 });
+  await expect(page.locator("#message-live .message.user")).toHaveCount(0);
+  await expect(page.locator('[data-activity-tab="prompt-queue"]')).toContainText("队列 1");
+  await page.locator('[data-activity-tab="prompt-queue"]').click();
+  await expect(page.locator(".prompt-queue-panel")).toContainText("只进入排队的消息");
 });
 
 test("images can be selected, pasted and dropped into a thumbnail strip above the user bubble", async ({
@@ -2416,6 +2448,241 @@ test("edit falls back to argument hunks without line numbers until the result ar
   );
   // 参数里没有文件行号，行号列留空
   await expect(card.locator(".diff-removed .diff-number")).toHaveText("");
+});
+
+// 两个扩展请求：一个 ask_user_question（package 定制外观）、一个通用请求
+const activityRequests = () => [
+  {
+    id: "act-generic",
+    sessionId: "session-browser",
+    kind: "select",
+    title: "通用请求",
+    text: "请选择一项",
+    options: ["甲", "乙"],
+  },
+  {
+    id: "act-ask",
+    sessionId: "session-browser",
+    packageId: "@juicesharp/rpiv-ask-user-question",
+    kind: "ask_user_question",
+    toolCallId: "tc-1",
+    title: "很长的工具标题",
+    questions: [
+      {
+        header: "选择",
+        question: "选哪个？",
+        multiSelect: true,
+        options: [
+          { label: "A", description: "甲" },
+          { label: "B", description: "乙" },
+        ],
+      },
+    ],
+  },
+];
+
+test("activity bar shows one tab per extension request with package look", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({ requests: activityRequests() });
+  const errors = await open(page, web);
+  const tabs = page.locator(".activity-tab");
+  await expect(tabs).toHaveCount(2);
+
+  // 同优先级（1000）按到达顺序：先来的通用请求在左
+  await expect(tabs.nth(0).locator(".activity-tab-label")).toHaveText("通用请求");
+  // ask_user_question 用 package 定制名（不是那个很长的工具标题）
+  await expect(tabs.nth(1).locator(".activity-tab-label")).toHaveText("提问");
+  await expect(tabs.nth(1).locator(".activity-tab-icon svg")).toHaveCount(1);
+
+  // 各自 tone 不同：通用=紫，提问=黄
+  const borderColors = await page
+    .locator(".activity-tab")
+    .evaluateAll((nodes) =>
+      nodes.map((node) => getComputedStyle(node).borderLeftColor),
+    );
+  expect(new Set(borderColors).size).toBe(2);
+
+  // 大框内容按 tab 切换，且都保持挂载（切换不重建）
+  await expect(page.locator(".activity-panel:visible")).toHaveCount(1);
+  // `.role` 用 text-transform:uppercase，innerText 取到的是原样大小写
+  await expect(
+    page.locator(".activity-panel:visible .plugin-request-head .role"),
+  ).toContainText("select");
+  await page.locator('.activity-panel:visible [data-activity-tab="act-ask"]').click();
+  await expect(page.locator(".ask-user-form")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("prompt queue activity stacks guidance above queued messages and deletes one item", async ({
+  page,
+  web,
+}) => {
+  const queue = {
+    revision: 1,
+    count: 1,
+    steering: [],
+    followUp: [
+      { id: "followUp:0:one", kind: "followUp", index: 0, text: "已有后续任务" },
+    ],
+  };
+  web.setSnapshot({ busy: true, pending: true, promptQueue: queue });
+  web.setActionHandler(async (action, server) => {
+    if (action.type === "queue_add") {
+      const items = action.kind === "steer" ? queue.steering : queue.followUp;
+      items.push({
+        id: `${action.kind}:${items.length}:new`,
+        kind: action.kind,
+        index: items.length,
+        text: action.text,
+      });
+      queue.revision += 1;
+      queue.count += 1;
+      server.publish({ promptQueue: structuredClone(queue) });
+      return { promptQueue: queue };
+    }
+    if (action.type === "queue_remove") {
+      const removed = [...queue.steering, ...queue.followUp].find(
+        (item) => item.id === action.id,
+      );
+      queue.steering = queue.steering.filter((item) => item.id !== action.id);
+      queue.followUp = queue.followUp.filter((item) => item.id !== action.id);
+      queue.followUp.forEach((item, index) => (item.index = index));
+      queue.revision += 1;
+      queue.count -= 1;
+      server.publish({ promptQueue: structuredClone(queue) });
+      return { removed, queue };
+    }
+    return {};
+  });
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  const tab = page.locator('[data-activity-tab="prompt-queue"]');
+  await expect(tab).toContainText("队列 1");
+  await tab.click();
+  const panel = page.locator(".prompt-queue-panel");
+  await expect(panel).toContainText("已有后续任务");
+  await expect(panel.locator(".prompt-queue-compose")).toHaveCount(0);
+  await expect(panel.locator(".prompt-queue-group")).toHaveCount(1);
+  await expect(panel.locator(".prompt-queue-group")).toHaveText(
+    /排队后续轮.*Follow-up 会在当前轮结束后执行.*已有后续任务/s,
+  );
+  await expect(panel.locator(".prompt-queue-group-head")).toHaveCSS(
+    "white-space",
+    "nowrap",
+  );
+  const layout = await panel.locator(".prompt-queue-lists").evaluate((node) => ({
+    display: getComputedStyle(node).display,
+    columns: getComputedStyle(node).gridTemplateColumns,
+  }));
+  expect(layout.display).toBe("grid");
+  expect(layout.columns.split(" ")).toHaveLength(1);
+  await panel.getByRole("button", { name: "删除排队消息：已有后续任务" }).click();
+  await expect(page.locator('[data-activity-tab="prompt-queue"]')).toHaveCount(0);
+  expect(web.actions.filter((action) => action.type === "queue_remove")[0]).toMatchObject({
+    id: "followUp:0:one",
+    revision: 1,
+  });
+});
+
+test("prompt queue activity stays hidden while the model is busy with an empty queue", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    busy: true,
+    pending: false,
+    promptQueue: { revision: 0, count: 0, steering: [], followUp: [] },
+  });
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  await expect(page.locator('[data-activity-tab="prompt-queue"]')).toHaveCount(0);
+});
+
+test("prompt queue activity edits queued text and moves it into steering", async ({
+  page,
+  web,
+}) => {
+  const queue = {
+    revision: 4,
+    count: 1,
+    steering: [],
+    followUp: [
+      { id: "followUp:0:draft", kind: "followUp", index: 0, text: "原排队内容" },
+    ],
+  };
+  web.setSnapshot({ busy: true, pending: true, promptQueue: queue });
+  web.setActionHandler(async (action, server) => {
+    if (action.type !== "queue_update_item") return {};
+    const previous = queue.followUp[0];
+    queue.followUp = [];
+    queue.steering = [
+      { id: "steer:0:updated", kind: "steer", index: 0, text: action.text },
+    ];
+    queue.revision += 1;
+    server.publish({ promptQueue: structuredClone(queue) });
+    return { previous, updated: queue.steering[0], queue };
+  });
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  await page.locator('[data-activity-tab="prompt-queue"]').click();
+  const panel = page.locator(".prompt-queue-panel");
+
+  await panel.getByRole("button", { name: "编辑排队消息：原排队内容" }).click();
+  const editor = panel.locator('textarea[aria-label="编辑排队消息"]');
+  await editor.fill("修改后的引导内容");
+  await panel.getByRole("button", { name: "保存为引导" }).click();
+
+  await expect(panel.getByText("修改后的引导内容", { exact: true })).toBeVisible();
+  const action = web.actions.find((item) => item.type === "queue_update_item");
+  expect(action).toMatchObject({
+    id: "followUp:0:draft",
+    revision: 4,
+    kind: "steer",
+    text: "修改后的引导内容",
+  });
+});
+
+test("collapsing an activity panel keeps the in-progress form state", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({ requests: activityRequests() });
+  const errors = await open(page, web);
+  // 切到提问那个大框并填一半
+  await page.locator('.activity-tabs [data-activity-tab="act-ask"]').click();
+  await expect(page.locator(".ask-user-form")).toBeVisible();
+  await page.locator('[data-ask-option="0"]').check();
+  await page.locator("[data-ask-text]").fill("填到一半的答案");
+
+  // 最小化：大框全部隐藏，但**不卸载**
+  await page.locator("[data-activity-collapse]").click();
+  await expect(page.locator(".activity-panel:visible")).toHaveCount(0);
+  await expect(page.locator(".ask-user-form")).toHaveCount(1); // 仍在 DOM 中
+
+  // 再次展开：之前填的内容必须原样保留
+  await page.locator('.activity-tabs [data-activity-tab="act-ask"]').click();
+  await expect(page.locator('[data-ask-option="0"]')).toBeChecked();
+  await expect(page.locator("[data-ask-text]")).toHaveValue("填到一半的答案");
+  expect(errors).toEqual([]);
+});
+
+test("activity bar keyboard navigation moves focus between requests", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({ requests: activityRequests() });
+  const errors = await open(page, web);
+  const focusedTab = () =>
+    page.evaluate(() =>
+      document.activeElement?.getAttribute("data-activity-tab"),
+    );
+
+  // 展开态下方向键移动焦点，并切换到对应的大框
+  await page.locator('.activity-panel:visible [data-activity-tab="act-generic"]').press("ArrowRight");
+  await expect.poll(focusedTab).toBe("act-ask");
+  await expect(page.locator(".ask-user-form")).toBeVisible();
+  await page.locator('.activity-panel:visible [data-activity-tab="act-ask"]').press("ArrowLeft");
+  await expect.poll(focusedTab).toBe("act-generic");
+  expect(errors).toEqual([]);
 });
 
 test("the session title is renamed through the command path", async ({

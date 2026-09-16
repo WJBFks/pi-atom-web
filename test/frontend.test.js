@@ -32,6 +32,13 @@ import {
 } from "../web/components/conversation/ToolCallBlock.js";
 import { codeBlock } from "../web/markdown.js";
 import {
+  activityLook,
+  nextActivityTab,
+  sortActivityTabs,
+  EXTENSION_REQUEST_PRIORITY,
+  EXTENSION_REQUEST_TONE,
+} from "../web/components/composer/ActivityBar.js";
+import {
   CONTENT_WIDTH_STORAGE_KEY,
   DEFAULT_CONTENT_WIDTH,
   MIN_CONTENT_WIDTH,
@@ -1330,4 +1337,91 @@ test("context page lists branch and compaction summaries with their labels", () 
     ],
   );
   assert.deepEqual(contextSummaries(), []);
+});
+
+test("activity look: package-specific label/icon/tone with a fallback", () => {
+  // 通用扩展请求：默认紫 + 标题作为名字
+  const generic = activityLook({ kind: "select", title: "通用请求" });
+  assert.deepEqual(generic.tone, EXTENSION_REQUEST_TONE);
+  assert.equal(generic.label, "通用请求");
+  assert.equal(generic.icon, "box");
+
+  // ask_user_question 用 package 定制：名字「提问」、黄色、专用图标
+  const ask = activityLook({
+    packageId: "@juicesharp/rpiv-ask-user-question",
+    kind: "ask_user_question",
+    title: "很长很长的工具标题（不该被当作 tab 名）",
+  });
+  assert.equal(ask.label, "提问");
+  assert.equal(ask.icon, "help");
+  assert.notDeepEqual(ask.tone, EXTENSION_REQUEST_TONE);
+  for (const key of ["color", "background", "border"])
+    assert.match(ask.tone[key], /^#[0-9a-f]{6}$/i, `tone.${key}`);
+
+  // 优先级对所有扩展请求统一为 1000
+  assert.equal(EXTENSION_REQUEST_PRIORITY, 1000);
+
+  // 键盘：左右循环、Home/End；无当前项时落到第一个
+  const tabs = [
+    { id: "a" }, { id: "b" }, { id: "c" },
+  ];
+  assert.equal(nextActivityTab(tabs, "a", "ArrowRight"), "b");
+  assert.equal(nextActivityTab(tabs, "c", "ArrowRight"), "a");
+  assert.equal(nextActivityTab(tabs, "a", "ArrowLeft"), "c");
+  assert.equal(nextActivityTab(tabs, "b", "Home"), "a");
+  assert.equal(nextActivityTab(tabs, "b", "End"), "c");
+  assert.equal(nextActivityTab(tabs, null, "ArrowRight"), "a");
+  // 只有一个 tab / 无 tab 时不移动
+  assert.equal(nextActivityTab([tabs[0]], "a", "ArrowRight"), null);
+  assert.equal(nextActivityTab([], "a", "ArrowRight"), null);
+});
+
+test("activity tabs sort by priority desc, then by arrival time asc", () => {
+  // 优先级大的在左
+  const byPriority = sortActivityTabs([
+    { id: "a", priority: 1, arrivedAt: 1 },
+    { id: "b", priority: 3, arrivedAt: 2 },
+    { id: "c", priority: 2, arrivedAt: 3 },
+  ]);
+  assert.deepEqual(byPriority.map((t) => t.id), ["b", "c", "a"]);
+
+  // 优先级相等时先到的在左
+  const byArrival = sortActivityTabs([
+    { id: "later", priority: 5, arrivedAt: 200 },
+    { id: "first", priority: 5, arrivedAt: 100 },
+    { id: "middle", priority: 5, arrivedAt: 150 },
+  ]);
+  assert.deepEqual(byArrival.map((t) => t.id), ["first", "middle", "later"]);
+
+  // 可正可负：负数排最后
+  const withNegative = sortActivityTabs([
+    { id: "neg", priority: -5, arrivedAt: 1 },
+    { id: "zero", priority: 0, arrivedAt: 2 },
+    { id: "pos", priority: 2.5, arrivedAt: 3 },
+  ]);
+  assert.deepEqual(withNegative.map((t) => t.id), ["pos", "zero", "neg"]);
+
+  // 不修改传入数组
+  const source = [
+    { id: "a", priority: 1, arrivedAt: 1 },
+    { id: "b", priority: 2, arrivedAt: 2 },
+  ];
+  sortActivityTabs(source);
+  assert.deepEqual(source.map((t) => t.id), ["a", "b"]);
+
+  // 缺字段按 0 处理，结果稳定可预测
+  assert.deepEqual(
+    sortActivityTabs([{ id: "x" }, { id: "y", priority: -1 }]).map((t) => t.id),
+    ["x", "y"],
+  );
+
+  // 同优先级（扩展请求都是 1000）时按到达顺序稳定排列
+  assert.deepEqual(
+    sortActivityTabs([
+      { id: "a", priority: 1000, arrivedAt: 0 },
+      { id: "b", priority: 1000, arrivedAt: 1 },
+      { id: "c", priority: 1000, arrivedAt: 2 },
+    ]).map((t) => t.id),
+    ["a", "b", "c"],
+  );
 });

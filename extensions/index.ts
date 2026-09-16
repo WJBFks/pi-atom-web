@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
-import { ExtensionRunner } from "@earendil-works/pi-coding-agent";
+import { AgentSession, ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
@@ -7,14 +7,20 @@ import { createPackageCompatibilityRegistry } from "./packages/registry.ts";
 import { bridgeDialogs } from "./dialogs.ts";
 import { startServer } from "./server.ts";
 import { normalizeRunningTool } from "./tool-events.ts";
+import { statusNoteFor } from "./status-note.ts";
 import {
   installEntryRendererObserver,
   normalizeCustomEntry,
   onEntryRendererObserved,
 } from "./custom-entry.ts";
 import { createSessionStateStore } from "./session-state.ts";
+import {
+  installPromptQueueRuntime,
+  promptQueueSnapshot,
+} from "./prompt-queue.ts";
 
 const RELOAD_HANDOFF = Symbol.for("pi-atom-web.reload-handoff");
+const promptQueues = installPromptQueueRuntime(AgentSession);
 import {
   HISTORY_PAGE_TURNS,
   HISTORY_TURNS,
@@ -118,21 +124,175 @@ export default function atomWeb(pi) {
     if (capturedDisplayRecords.length) persistState();
   }
   let notificationBridge, dialogs;
+  let stopPromptQueueListener;
+  function currentPromptQueue(ctx = context) {
+    try {
+      return promptQueues.snapshot(ctx?.sessionManager);
+    } catch {
+      return promptQueueSnapshot();
+    }
+  }
+  function bindPromptQueue(ctx) {
+    stopPromptQueueListener?.();
+    stopPromptQueueListener = undefined;
+    try {
+      stopPromptQueueListener = promptQueues.listen(
+        ctx.sessionManager,
+        (promptQueue) =>
+          publish(ctx, { promptQueue, pending: promptQueue.count > 0 }),
+      );
+    } catch {
+      // Older or replaced Pi runtimes may not expose AgentSession internals.
+    }
+  }
+  async function submitPrompt(content, options) {
+    if (promptQueues.has(context.sessionManager))
+      return promptQueues.submit(context.sessionManager, content, options);
+    // 旧 Pi 或测试宿主没有 AgentSession 观察入口时保留正式扩展 API 回退。
+    pi.sendUserMessage(content, {
+      deliverAs: options.mode,
+      ...(options.expandPromptTemplates === undefined
+        ? {}
+        : { expandPromptTemplates: options.expandPromptTemplates }),
+    });
+  }
   const stopRendererObserver = onEntryRendererObserved(ExtensionRunner, () => {
     if (context && server) publish(context, {}, { history: true });
   });
-  function recordDisplay(role, text, level) {
+  function recordDisplay(role, text, level, detail) {
     const branch = context.sessionManager.getBranch();
     displayRecords.push({
       id: `${context.sessionManager.getSessionId()}:display:${randomUUID()}`,
       sessionId: context.sessionManager.getSessionId(),
       anchor: branch.at(-1)?.id ?? null,
-      message: { role, content: stripVTControlCharacters(String(text)), level },
+      message: {
+        role,
+        content: stripVTControlCharacters(String(text)),
+        level,
+        ...(detail ? { detail: String(detail).slice(0, 4096) } : {}),
+      },
     });
     if (displayRecords.length > 500) displayRecords.shift();
     persistState();
     publish(context, {}, { history: true });
   }
+  // 已记录过中止提示的 branch 末尾 entry id —— 同一轮不要重复插红条。
+  let interruptedEntryId = null;
+  // 待插入的「状态提示」：切换模型 / 思考级别时暂存，下一次发送 prompt 前插入，
+  // 说明这一轮是在什么配置下跑的（用户看到的就是「先有状态提示，再有这轮对话」）。
+  //
+  // **只保留最后一次**：用户连续切了好几次再输入，中间过程的切换没有意义，
+  // 只应在输入前提示最终那一次（模型已切换为\`最后值\`）。
+  let pendingStatusNote = "";
+
+  /**
+   * 模型被终止（用户中断 / 模型报错）时补一条系统记录，Web 端渲染成红色横线。
+   *
+   * 判据来自宿主：一轮结束时最后一条 assistant 消息的 stopReason 为
+   * "aborted"（用户中断）或 "error"（模型/网络报错），errorMessage 为详情。
+   * 正常结束（stop / toolUse）不记录，所以不会误报。
+   */
+  function recordInterruption(branch) {
+    const last = branch.at(-1);
+    if (last?.type !== "message" || last.message?.role !== "assistant") return;
+    const reason = last.message.stopReason;
+    if (reason !== "aborted" && reason !== "error") return;
+    // 同一条 entry 只记一次（agent_end / agent_settled 可能都触发）。
+    // 带上会话 id：换会话后 entry id 不保证唯一，不带会把新会话的误判成已记录。
+    const marker = `${context.sessionManager.getSessionId()}:${last.id}`;
+    if (interruptedEntryId === marker) return;
+    interruptedEntryId = marker;
+    const detail = stripVTControlCharacters(
+      String(last.message.errorMessage || "").replace(/\s+/g, " ").trim(),
+    );
+    // 中止原因：用户中断 / 模型或网络报错，**统一显示为「已中断」**
+    // （不再区分「模型出错」），能拿到具体原因时显示成「已中断：原因」。
+    recordDisplay(
+      "interrupted",
+      detail ? `已中断：${detail}` : "已中断",
+      reason,
+      detail,
+    );
+  }
+
+  // 工具被中止时宿主写的固定措辞（bash 被 Esc 打断等）。
+  const OPERATION_ABORTED = /operation aborted|aborted/i;
+
+  /** 安全读一个字段：异常 getter / 循环引用都不该让事件处理抛错。 */
+  function safeField(source, key) {
+    try {
+      return source?.[key];
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 把 toolResult 的 result 归一成纯文本，供上面那句措辞匹配。 */
+  function toolResultText(result) {
+    const value = safeField(result, "output") ?? safeField(result, "content") ?? result;
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) {
+      return value
+        .map((block) =>
+          typeof block === "string" ? block : String(safeField(block, "text") ?? ""),
+        )
+        .join("\n");
+    }
+    try {
+      return JSON.stringify(value) ?? "";
+    } catch {
+      return "";
+    }
+  }
+
+  // 同一个工具调用只记一条，避免 update/end 重复插入。
+  const toolAbortNotes = new Set();
+
+  /**
+   * 工具本身被中止（用户按 Esc、或进程被杀）时，结果里是
+   * `isError: true` 且文本为 `Operation aborted`（宿主的固定措辞）。
+   * 这种情况补一条红色的「操作已中断」状态提示；hover 双语说明原文。
+   */
+  function recordToolAbort(event) {
+    const id = String(safeField(event, "toolCallId") || "");
+    if (!id || toolAbortNotes.has(id)) return;
+    const failed = safeField(event, "isError") === true;
+    if (!failed) return;
+    const text = toolResultText(safeField(event, "result"));
+    if (!OPERATION_ABORTED.test(text)) return;
+    toolAbortNotes.add(id);
+    if (toolAbortNotes.size > 500)
+      toolAbortNotes.delete(toolAbortNotes.values().next().value);
+    // 与模型侧统一：显示「已中断」，并把工具结果里的原文作为原因带上。
+    const detail = text.trim().replace(/\s+/g, " ");
+    recordDisplay(
+      "interrupted",
+      detail ? `已中断：${detail}` : "已中断",
+      "tool-aborted",
+      detail,
+    );
+  }
+
+  /**
+   * 记录「状态提示」：模型 / 思考级别的变更，**统一格式**——
+   * 切换模型与切换思考级别都显示「模型已切换为\`模型id · 思考级别\`」，
+   * 不单独为思考级别出提示。
+   *
+   * 用宿主事件驱动而不是 Web 动作 —— TUI 里切换同样要出现在网页里。
+   *
+   * **总是覆盖为最新值**：连续切好几次再输入，只提示最终那一次。
+   * 不要用「值没变就不记」来做去重 —— 那样会漏掉 A→B→A 场景里最后一次
+   * A 的提示（中间换过、最后又换回来，最终值可能与最早相同）。
+   * 宿主事件对一次切换只发一次，重复覆盖同值是无害的。
+   */
+  function recordStatusChange(ctx) {
+    const note = statusNoteFor(
+      ctx.model ? String(ctx.model.id) : "",
+      String(ctx.thinkingLevel || "off"),
+    );
+    if (note) pendingStatusNote = note;
+  }
+
   function detachNotifications() {
     const closing = dialogs;
     dialogs = undefined;
@@ -430,6 +590,7 @@ export default function atomWeb(pi) {
       thinking: context.thinkingLevel || "off",
       busy: !context.isIdle(),
       pending: context.hasPendingMessages(),
+      promptQueue: currentPromptQueue(),
       commands: commands(),
       stats: sessionStats(),
       ...windowedMessages(),
@@ -522,6 +683,20 @@ export default function atomWeb(pi) {
       dialogs.respond(input.id, input.value, input.cancel === true);
       return;
     }
+    if (input.type === "queue_add") {
+      const promptQueue = await promptQueues.add(
+        context.sessionManager,
+        input.kind,
+        input.text,
+      );
+      return { promptQueue };
+    }
+    if (input.type === "queue_remove") {
+      return promptQueues.remove(context.sessionManager, input);
+    }
+    if (input.type === "queue_update_item") {
+      return promptQueues.update(context.sessionManager, input);
+    }
     if (input.type === "save_ui_state") {
       completedThinkingTimings.clear();
       for (const entry of Object.entries(input.thinkingTimings || {}))
@@ -604,6 +779,11 @@ export default function atomWeb(pi) {
       mimeType,
     }));
     if (!text && !images.length) throw new Error("请输入消息或添加图片");
+    // 这一轮开始前把**最后一次**的状态提示落到会话里（顺序：状态提示 → 用户消息 → 回复）
+    if (pendingStatusNote) {
+      recordDisplay("status", pendingStatusNote);
+      pendingStatusNote = "";
+    }
     const content = images.length
       ? [...(text ? [{ type: "text", text }] : []), ...images]
       : text;
@@ -663,9 +843,11 @@ export default function atomWeb(pi) {
         ? trackSubmittedPrompt(text, startsImmediately, false)
         : null;
       try {
-        pi.sendUserMessage(text, {
-          deliverAs: input.mode,
+        await submitPrompt(text, {
+          mode: input.mode,
           expandPromptTemplates: true,
+          onError: (error) =>
+            context.ui.notify(`消息执行失败：${error.message}`, "error"),
         });
       } catch (error) {
         if (record) {
@@ -682,11 +864,20 @@ export default function atomWeb(pi) {
         }
         throw error;
       }
+      return { delivery: startsImmediately ? "started" : "queued" };
     } else {
       const startsImmediately = context.isIdle();
-      const record = trackSubmittedPrompt(content, startsImmediately);
+      const record = trackSubmittedPrompt(
+        content,
+        startsImmediately,
+        startsImmediately,
+      );
       try {
-        pi.sendUserMessage(content, { deliverAs: input.mode });
+        await submitPrompt(content, {
+          mode: input.mode,
+          onError: (error) =>
+            context.ui.notify(`消息执行失败：${error.message}`, "error"),
+        });
       } catch (error) {
         const index = pendingUserRecords.indexOf(record);
         if (index >= 0) removePendingUserRecord(record);
@@ -700,10 +891,12 @@ export default function atomWeb(pi) {
         });
         throw error;
       }
+      return { delivery: startsImmediately ? "started" : "queued" };
     }
   }
   pi.on("session_start", async (_event, ctx) => {
     context = ctx;
+    bindPromptQueue(ctx);
     const connection = globalThis[RELOAD_HANDOFF];
     // Reload peers may notify while project state and the replacement server load.
     // Install the shared UI wrapper before the first await and merge those records
@@ -754,6 +947,7 @@ export default function atomWeb(pi) {
   ]) {
     pi.on(name, async (_event, ctx) => {
       context = ctx;
+      bindPromptQueue(ctx);
       liveMessage = null;
       liveRunId = null;
       pendingLiveLinks.clear();
@@ -786,7 +980,16 @@ export default function atomWeb(pi) {
   ]) {
     pi.on(name, (_event, ctx) => {
       context = ctx;
+      // 模型 / 思考级别变更由宿主事件统一捕获：TUI 里切换也会触发，
+      // 而 Web 动作路径（select_model / select_thinking）之后也会收到同一事件，
+      // 所以记在这里 + 按值去重，两条路径都覆盖且不重复。
+      if (name === "model_select" || name === "thinking_level_select") {
+        recordStatusChange(ctx);
+      }
       if (name === "agent_end" || name === "agent_settled") {
+        // agent_settled 才代表「不会再有自动重试/续跑」，此时判定中止最准；
+        // agent_end 可能紧跟一次自动重试，过早记录会误报。
+        if (name === "agent_settled") recordInterruption(ctx.sessionManager.getBranch());
         if (responseWaitOwnerId) {
           const index = pendingUserRecords.findIndex(
             (record) => record.message.id === responseWaitOwnerId,
@@ -915,6 +1118,7 @@ export default function atomWeb(pi) {
       persistState();
     }
     runningTools.delete(event.toolCallId);
+    recordToolAbort(event);
     publish(
       ctx,
       {
@@ -925,6 +1129,8 @@ export default function atomWeb(pi) {
     );
   });
   pi.on("session_shutdown", async () => {
+    stopPromptQueueListener?.();
+    stopPromptQueueListener = undefined;
     stopRendererObserver();
     detachNotifications();
     await stateStore?.close();

@@ -1,4 +1,5 @@
 import {
+  shallowRef,
   computed,
   defineComponent,
   h,
@@ -11,10 +12,11 @@ import {
 import { useSessionStore } from "../../stores/session.js";
 import { useConversationStore } from "../../stores/conversation.js";
 import { useComposerStore } from "../../stores/composer.js";
+import { useDialogsStore } from "../../stores/dialogs.js";
 import { postAction } from "../../api/actions.js";
 import { icon } from "../../icons.js";
 import { writeClipboard } from "../../clipboard.js";
-import RequestDock from "../dialogs/RequestDock.js";
+import ActivityBar from "./ActivityBar.js";
 import CommandMenu from "./CommandMenu.js";
 import ModelPicker from "./ModelPicker.js";
 import ThinkingPicker from "./ThinkingPicker.js";
@@ -37,6 +39,7 @@ export default defineComponent({
   props: { token: String, onError: Function },
   setup(props) {
     const session = useSessionStore(),
+      dialogs = useDialogsStore(),
       conversation = useConversationStore(),
       composer = useComposerStore(),
       prompt = ref(),
@@ -238,6 +241,8 @@ export default defineComponent({
       if (
         (!text.trim() && !images.length) ||
         composer.sending ||
+        // 活动组件阻塞期间不允许提交新 prompt
+        dialogs.blocking.length > 0 ||
         session.connection !== "connected"
       )
         return;
@@ -251,26 +256,39 @@ export default defineComponent({
             session.instanceId || "legacy",
           );
         const sessionId = session.sessionId;
-        const optimisticId = !images.length && trimmed.startsWith("/")
+        const optimisticId = session.busy || (!images.length && trimmed.startsWith("/"))
           ? null
           : conversation.addOptimisticUserMessage(
               images.length
                 ? [...(trimmed ? [{ type: "text", text: trimmed }] : []), ...images.map((image) => ({ type: "image", ...image }))]
                 : trimmed,
             );
+        composer.clear();
+        resize();
         composer.sending = true;
         try {
-          await request({ type: "send", text, images, sessionId, mode: "followUp" });
-          if (
-            alive &&
-            session.sessionId === sessionId &&
-            composer.draft === text
-          )
-            composer.clear();
-          resize();
+          const result = await request({
+            type: "send",
+            text,
+            images,
+            sessionId,
+            mode: "followUp",
+          });
+          if (optimisticId && result?.delivery === "queued")
+            conversation.removeOptimisticUserMessage(optimisticId);
         } catch (error) {
           if (optimisticId)
             conversation.removeOptimisticUserMessage(optimisticId);
+          if (
+            alive &&
+            session.sessionId === sessionId &&
+            !composer.draft &&
+            composer.images.length === 0
+          ) {
+            composer.setDraft(text);
+            composer.images = images.map((image) => ({ ...image }));
+            resize();
+          }
           if (reload && !(error instanceof TypeError))
             sessionStorage.removeItem("atom-refresh-after-reload");
           report(error);
@@ -372,9 +390,58 @@ export default defineComponent({
       draggingImages.value = false;
       addImages(event.dataTransfer.files);
     };
+    // 浮层区域不吃滚轮：滚轮落在活动组件浮层上时，主会话的 #scroll 不得跟着滚。
+    //
+    // 为什么不用 Vue 的 onWheel：浮层位于 #scroll 内部，原生滚动由 #scroll 自己完成，
+    // 等事件冒泡到浮层再 preventDefault 时浏览器已经滚过了（实测 scrollTop 1315→400）。
+    // 必须用 **非 passive + 捕获阶段** 的原生监听器，在 #scroll 拿到之前就吃掉事件。
+    const overlayNode = shallowRef();
+    let overlayWheel = null;
+    onMounted(() => {
+      const node = overlayNode.value;
+      if (!node) return;
+      overlayWheel = (event) => {
+        // 找到光标下真正可滚动的容器（.ask-content / .plugin-request-body 等）：
+        // 只有它在该方向上还能滚，才放行让它自己滚；否则吃掉事件。
+        let el = event.target instanceof Element ? event.target : null;
+        while (el && el !== node) {
+          const style = getComputedStyle(el);
+          if (
+            /(auto|scroll)/.test(style.overflowY) &&
+            el.scrollHeight > el.clientHeight + 1
+          ) {
+            const atTop = el.scrollTop <= 0;
+            const atBottom =
+              el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+            const canScroll =
+              event.deltaY < 0 ? !atTop : event.deltaY > 0 ? !atBottom : false;
+            if (canScroll) return;
+          }
+          el = el.parentElement;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+      };
+      node.addEventListener("wheel", overlayWheel, {
+        passive: false,
+        capture: true,
+      });
+    });
+    onUnmounted(() => {
+      if (overlayWheel) overlayNode.value?.removeEventListener("wheel", overlayWheel, true);
+      overlayWheel = null;
+    });
+
     return () =>
       h("section", { ref: dock, class: "compose-wrap" }, [
-        h(RequestDock, props),
+        // 活动组件（阻塞提示 + 活动栏）是**独立浮层**，叠在输入卡上方：
+        //   · position:absolute → 不占 dock 高度，`--compose-height` 只算输入卡
+        //     与状态栏，所以展开大框既不推高会话、也不改变滚动位置；
+        //   · 自身无背景 → 可以透视下层滚动的消息（输入卡与状态栏仍有背景）。
+        h("div", { class: "dock-overlay", ref: overlayNode }, [
+          // 扩展请求已由活动组件栏接管（不再有独立的请求面板）。
+          h(ActivityBar, { token: props.token, onError: props.onError }),
+        ]),
         session.error
           ? h("div", { id: "error", role: "alert" }, session.error)
           : null,
@@ -392,6 +459,17 @@ export default defineComponent({
             },
           },
           [
+            // 阻塞提示：浮动在输入框**中间**的一条横幅。
+            // 绝对定位（不占文档流），所以输入卡高度与 --compose-height 都不受影响。
+            dialogs.blockedParts.length
+              ? h(
+                  "div",
+                  { class: "session-blocked", role: "status" },
+                  dialogs.blockedParts.map((part) =>
+                    typeof part === "string" ? part : h("code", part.code),
+                  ),
+                )
+              : null,
             h(CommandMenu, {
               matches: matches.value,
               query: commandVisible.value,
@@ -517,6 +595,8 @@ export default defineComponent({
                     disabled:
                       (!composer.draft.trim() && !composer.images.length) ||
                       composer.sending ||
+                      // 被活动组件阻塞时发送按钮同样不可用（与 submit 守卫一致）
+                      dialogs.blocking.length > 0 ||
                       session.connection !== "connected",
                   },
                   icon("send"),

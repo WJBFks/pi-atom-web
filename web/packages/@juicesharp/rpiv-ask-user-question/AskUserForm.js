@@ -57,10 +57,10 @@ export default defineComponent({
     let frame,
       disposed = false;
     const update = (change) => {
+      // 扩展请求已并入活动组件栏，滚动位置只需保留页面与对话区（以及本表单内容区）
       const nodes = [
         document.scrollingElement,
         document.querySelector("#scroll"),
-        document.querySelector("#plugin-requests"),
         host.value?.querySelector(".ask-content"),
       ];
       const positions = nodes.map(
@@ -375,16 +375,14 @@ export default defineComponent({
                   ` ${state.tab + 1} / ${questions.length} · ${question.multiSelect ? "多选" : "单选"}`,
                 ),
             ]),
-            button(state.collapsed ? "展开" : "收起", {
-              "data-ask-collapse": "",
-              onClick: () =>
-                update(() => {
-                  state.collapsed = !state.collapsed;
-                }),
-            }),
           ]),
           h("div", { class: "ask-content" }, children),
           h("footer", { class: "ask-footer" }, [
+            // 「取消问卷」放在最左（不再用 spacer 把按钮推到右侧）
+            button("取消问卷", {
+              "data-ask-cancel": "",
+              onClick: () => send(true),
+            }),
             h("span", { class: "spacer" }),
             !review.value &&
               button("清除选择", {
@@ -398,10 +396,6 @@ export default defineComponent({
                     };
                   }),
               }),
-            button("取消问卷", {
-              "data-ask-cancel": "",
-              onClick: () => send(true),
-            }),
             !review.value &&
               state.tab > 0 &&
               button("上一题", { onClick: () => tab(state.tab - 1) }),

@@ -12,6 +12,8 @@ import ThinkingBlock from "./ThinkingBlock.js";
 import ToolCallBlock from "./ToolCallBlock.js";
 import DisclosureBlock from "./DisclosureBlock.js";
 import CustomEntryBlock from "./CustomEntryBlock.js";
+import { isAbortNotice } from "./abort-notice.js";
+import { writeClipboard } from "../../clipboard.js";
 
 export const PreviewImage = defineComponent({
   name: "PreviewImage",
@@ -71,6 +73,122 @@ export const PreviewImage = defineComponent({
           ]))
         : null,
     ];
+  },
+});
+
+/**
+ * 命令名：从完整命令里取出第一个词（`/piolium-help --fresh` → `/piolium-help`）。
+ * 非 `/` 开头的原样返回。
+ */
+export function stripCommandPrefix(text) {
+  const value = String(text || "").trim();
+  if (!value.startsWith("/")) return value;
+  return value.split(/\s+/)[0] || value;
+}
+
+/**
+ * 横线样式的行内条目标记（内部称「状态提示」）：命令 / 模型被终止 / 模型与思考级别变更共用。
+ *
+ * 外观：一条贯穿的分割线，文字居中压在线上（`-----命令：/piolium-help-----` 的观感）。
+ * 线用 CSS 画（左右两段 1px 线 + 中间文字），不是减号字符拼接，宽度自适应。
+ *
+ * · `label` 是主文案；`code` 是其中要用行内代码样式呈现的部分（可为空）。
+ * · 命令默认只显示命令名；圆圈感叹号 hover 弹自定义浮层（两行：全文 / 点击复制），
+ *   不用系统 title —— 系统提示样式不可控、且有延迟。
+ * · 点击气泡复制，复制后有「已复制」反馈。
+ */
+export const CommandRule = defineComponent({
+  name: "CommandRule",
+  props: {
+    label: { type: String, required: true },
+    code: { type: String, default: "" },
+    full: { type: String, default: "" },
+    /** 浮层里的第二行提示（中英双语等），默认「点击复制」。 */
+    hint: { type: String, default: "点击复制" },
+    kind: { type: String, default: "command" },
+    blockKey: { type: String, default: "" },
+  },
+  setup(props) {
+    const copied = ref(false);
+    const open = ref(false);
+    const root = ref();
+    let hideTimer = null;
+    const show = () => {
+      clearTimeout(hideTimer);
+      open.value = true;
+    };
+    // 延迟一点再收起：鼠标从气泡移到弹层途中有间隙，立刻收起会闪
+    const hide = () => {
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => (open.value = false), 120);
+    };
+    const source = () => props.full || props.code || props.label;
+    const copy = async () => {
+      try {
+        await writeClipboard(source());
+        copied.value = true;
+        setTimeout(() => (copied.value = false), 1200);
+      } catch {
+        copied.value = false;
+      }
+    };
+    onUnmounted(() => clearTimeout(hideTimer));
+    return () =>
+      h(
+        "div",
+        {
+          class: ["command-rule", `command-rule-${props.kind}`],
+          "data-command-rule": props.kind,
+          "data-key": props.blockKey,
+          ref: root,
+        },
+        [
+          // 一条贯穿整宽的分割线（绝对定位，起止点与其它条目完全一致，
+          // 不随文字长短变化），文字居中压在线上并用底色遮断中间那段。
+          h("span", { class: "command-rule-line", "aria-hidden": "true" }),
+          h("span", { class: "command-rule-body" }, [
+            h("span", { class: "command-rule-label" }, props.label),
+            // 命令名用行内代码样式（仅限状态栏/hover 之外的主文案）
+            props.code ? h("code", { class: "command-rule-code" }, props.code) : null,
+            h(
+              "span",
+              {
+                class: "command-rule-info-wrap",
+                onMouseenter: show,
+                onMouseleave: hide,
+                onFocusin: show,
+                onFocusout: hide,
+              },
+              [
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    class: "command-rule-info",
+                    "aria-label": copied.value ? "已复制" : `复制：${source()}`,
+                    "aria-expanded": String(open.value),
+                    onClick: copy,
+                  },
+                  icon(copied.value ? "check" : "alert"),
+                ),
+                // 自定义浮层：两行 —— 第一行全文，第二行点击复制
+                open.value
+                  ? h("span", { class: "command-rule-tip", role: "tooltip" }, [
+                      h("span", { class: "command-rule-tip-full" }, source()),
+                      // 第二行固定显示操作提示（复制反馈只体现在图标变对勾上，
+                      // 不再把文案换成「已复制」）
+                      h("span", { class: "command-rule-tip-hint" }, props.hint),
+                    ])
+                  : null,
+              ],
+            ),
+          ]),
+          // 右侧那一段线：与左侧等分剩余空间，文字因此居中。
+          // （曾改成单条绝对定位整宽线时把它删掉过，恢复布局时必须补回来，
+          //   否则只剩左线、文字会被挤到最右。）
+          h("span", { class: "command-rule-line", "aria-hidden": "true" }),
+        ],
+      );
   },
 });
 
@@ -144,18 +262,38 @@ export default defineComponent({
         );
       }
       if (message.role === "command") {
-        return h(
-          "article",
-          { class: ["message", "user"] },
-          [
-            h("div", { class: "role" }, "命令"),
-            h(
-              "div",
-              { class: "notification-text" },
-              String(message.content || ""),
-            ),
-          ],
-        );
+        // 只展示命令名；完整命令（含参数）放 hover 浮层，点击可复制。
+        const full = String(message.content || "");
+        return h(CommandRule, {
+          label: "命令：",
+          code: stripCommandPrefix(full),
+          full,
+          kind: "command",
+          blockKey: key,
+        });
+      }
+      if (message.role === "status") {
+        // 状态提示：模型 / 思考级别变更（发 prompt 前插入，说明这轮是在什么配置下跑的）。
+        // 文案里用反引号标出要用行内代码样式呈现的部分（如 `DeepSeek V4.1 Flash · high`）。
+        const raw = String(message.content || "");
+        const match = /`([^`]*)`/.exec(raw);
+        return h(CommandRule, {
+          label: match ? raw.slice(0, match.index) : raw,
+          code: match ? match[1] : "",
+          full: raw.replace(/`/g, ""),
+          kind: "status",
+          blockKey: key,
+        });
+      }
+      if (message.role === "interrupted") {
+        // 被中止：工具级的 aborted 归入这一类，统一用红横线
+        return h(CommandRule, {
+          label: String(message.content || "已中断"),
+          full: String(message.detail || message.content || ""),
+          hint: String(message.hint || "点击复制"),
+          kind: "interrupted",
+          blockKey: key,
+        });
       }
       if (message.role === "toolResult") {
         const id = toolResultId(message);
@@ -244,7 +382,9 @@ export default defineComponent({
             userImages.map(renderImage),
           ),
           blocks.length ? h("div", { class: "body user-bubble" }, blocks) : null,
-          message.errorMessage && h("p", { class: "failure" }, message.errorMessage),
+          message.errorMessage &&
+            !isAbortNotice(message.errorMessage) &&
+            h("p", { class: "failure" }, message.errorMessage),
         ]);
       return h(
         "article",
@@ -255,6 +395,7 @@ export default defineComponent({
             : h("div", { class: "role" }, message.role),
           h("div", { class: "body" }, blocks),
           message.errorMessage &&
+            !isAbortNotice(message.errorMessage) &&
             h("p", { class: "failure" }, message.errorMessage),
         ],
       );

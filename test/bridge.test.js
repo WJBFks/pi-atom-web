@@ -561,17 +561,20 @@ test("real bridge updates statistics on same-session branch navigation and rejec
       }),
     });
     assert.equal(queued.status, 200);
-    let queuedPatch;
-    do {
-      queuedPatch = await nextEvent();
-    } while (
-      queuedPatch.patch?.pendingUserMessages?.[0]?.content !== "queued prompt"
-    );
-    assert.equal(queuedPatch.patch.responseWaitStartedAt, undefined);
+    assert.equal((await queued.json()).delivery, "queued");
     await events.get("message_update")(
       { message: { role: "assistant", content: "old response" } },
       ctx,
     );
+    branch.push({
+      id: "queued-entry",
+      type: "message",
+      timestamp: 1600,
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "queued prompt" }],
+      },
+    });
     await events.get("message_start")(
       {
         message: {
@@ -586,15 +589,13 @@ test("real bridge updates statistics on same-session branch navigation and rejec
       queuedStarted = await nextEvent();
     } while (typeof queuedStarted.patch?.responseWaitStartedAt !== "number");
     assert.equal(typeof queuedStarted.patch.responseWaitStartedAt, "number");
+    assert.deepEqual(queuedStarted.patch.pendingUserMessages || [], []);
     await events.get("agent_end")({}, ctx);
     let failedSubmissionCleared;
     do {
       failedSubmissionCleared = await nextEvent();
-    } while (
-      failedSubmissionCleared.patch?.responseWaitStartedAt !== null ||
-      !Array.isArray(failedSubmissionCleared.patch?.pendingUserMessages)
-    );
-    assert.deepEqual(failedSubmissionCleared.patch.pendingUserMessages, []);
+    } while (failedSubmissionCleared.patch?.responseWaitStartedAt !== null);
+    assert.deepEqual(failedSubmissionCleared.patch.pendingUserMessages || [], []);
     branch = [
       {
         id: "entry-two",

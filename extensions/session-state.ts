@@ -43,7 +43,11 @@ function normalize(value, sessionId) {
     ? value.displayRecords.slice(-MAX_ENTRIES).filter((record) =>
         record && record.sessionId === sessionId && typeof record.id === "string" &&
         record.id.length <= 1024 && (record.anchor === null || typeof record.anchor === "string") &&
-        record.message && ["command", "notification"].includes(record.message.role) &&
+        // 允许的角色：命令、通知，以及本轮新增的状态提示 / 中止提示。
+        // 这里原是 ["command","notification"] 的硬编码白名单，新增角色若不补进来
+        // 会被**静默丢弃**（落盘时过滤掉，恢复时自然也没有）。
+        record.message &&
+        ["command", "notification", "status", "interrupted"].includes(record.message.role) &&
         typeof record.message.content === "string" && record.message.content.length <= MAX_TEXT)
     : [];
   return {
