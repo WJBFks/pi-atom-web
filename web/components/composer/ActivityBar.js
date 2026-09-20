@@ -16,7 +16,7 @@ import PromptQueuePanel from "./PromptQueuePanel.js";
  * - `tone`：配色组（`{ color, background, border }`）
  * - `render`：大框内容（返回 VNode）
  *
- * 当前活动组件包括扩展请求，以及生成中或非空时出现的 Prompt 队列。
+ * 当前活动组件包括扩展请求，以及非空时出现的 Prompt 队列。
  */
 export const EXTENSION_REQUEST_PRIORITY = 1000;
 export const PROMPT_QUEUE_PRIORITY = 500;
@@ -86,6 +86,64 @@ export function nextActivityTab(tabs, current, key) {
   return null;
 }
 
+const queueTexts = (queue, kind) =>
+  (queue?.[kind] || []).map((item) =>
+    typeof item === "string"
+      ? item
+      : `${item?.id || ""}:${item?.text ?? ""}`,
+  );
+
+/**
+ * 只把新增和修改视为需要提醒的变化。纯删除（包括 Pi 消费队列）
+ * 不抢焦点；跨队列转换只提醒消息移入的目标队列。
+ */
+function changedItemIndexes(previous, current) {
+  let start = 0;
+  while (start < previous.length && previous[start] === current[start]) start += 1;
+  let beforeEnd = previous.length;
+  let afterEnd = current.length;
+  while (
+    beforeEnd > start &&
+    afterEnd > start &&
+    previous[beforeEnd - 1] === current[afterEnd - 1]
+  ) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+  return Array.from({ length: Math.max(0, afterEnd - start) }, (_, offset) =>
+    start + offset,
+  );
+}
+
+export function queueAttentionItems(previous, current) {
+  const beforeCount = Number(previous?.count || 0);
+  const afterCount = Number(current?.count || 0);
+  if (afterCount < beforeCount) return [];
+  const kinds = ["steering", "followUp"];
+  const targets = (selected) =>
+    selected.flatMap((kind) =>
+      changedItemIndexes(
+        queueTexts(previous, kind),
+        queueTexts(current, kind),
+      ).map((index) => `${kind}:${index}`),
+    );
+  if (afterCount > beforeCount) {
+    const grown = kinds.filter(
+      (kind) => queueTexts(current, kind).length > queueTexts(previous, kind).length,
+    );
+    return targets(grown);
+  }
+  const movedInto = kinds.filter(
+    (kind) => queueTexts(current, kind).length > queueTexts(previous, kind).length,
+  );
+  if (movedInto.length) return targets(movedInto);
+  return targets(kinds.filter(
+    (kind) =>
+      JSON.stringify(queueTexts(previous, kind)) !==
+      JSON.stringify(queueTexts(current, kind)),
+  ));
+}
+
 /**
  * 内联 tone：以 CSS 自定义属性下发原始色值（**激活态**的配色）。
  * 未激活态由 CSS 处理，不在这里写死第二套色值，因此深色主题也能自动适配。
@@ -121,10 +179,11 @@ export default defineComponent({
     // （节点被复用时 CSS animation 不会重跑）。表单状态由 panelBody 自己的
     // key 保留，不随这个 tick 重建。
     const openTick = ref(0);
+    const queueFlash = ref({ items: [], nonce: 0 });
 
     /**
-     * 每个未完成的扩展请求各占一个 tab；Prompt 队列在生成中或非空时
-     * 占一个 tab。队列不会自动展开，避免普通生成过程打断用户输入。
+     * 每个未完成的扩展请求各占一个 tab；Prompt 队列非空时占一个 tab。
+     * 队列新增或修改由独立 watcher 自动展开，删除和正常消费不触发。
      */
     const tabs = () => {
       const requestTabs = requests().map((request, index) => {
@@ -142,7 +201,7 @@ export default defineComponent({
       if (session.promptQueue.count > 0)
         requestTabs.push({
           id: "prompt-queue",
-          label: `队列 ${session.promptQueue.count}`,
+          label: `消息队列 ${session.promptQueue.count}`,
           icon: "mode",
           priority: PROMPT_QUEUE_PRIORITY,
           arrivedAt: Number.MAX_SAFE_INTEGER,
@@ -152,6 +211,38 @@ export default defineComponent({
         });
       return requestTabs;
     };
+
+    const copyQueue = () => ({
+      count: session.promptQueue.count,
+      steering: queueTexts(session.promptQueue, "steering"),
+      followUp: queueTexts(session.promptQueue, "followUp"),
+    });
+    let previousQueue = copyQueue();
+
+    watch(
+      () =>
+        JSON.stringify([
+          session.promptQueue.revision,
+          session.promptQueue.count,
+          queueTexts(session.promptQueue, "steering"),
+          queueTexts(session.promptQueue, "followUp"),
+        ]),
+      () => {
+        const currentQueue = copyQueue();
+        const items = queueAttentionItems(previousQueue, currentQueue);
+        previousQueue = currentQueue;
+        if (!items.length) return;
+        queueFlash.value = {
+          items,
+          nonce: queueFlash.value.nonce + 1,
+        };
+        const wasCollapsed = expanded.value !== "prompt-queue";
+        if (wasCollapsed) openTick.value += 1;
+        closing.value = null;
+        userCollapsed = false;
+        expanded.value = "prompt-queue";
+      },
+    );
 
     // 可见 tab：按优先级降序（大的在左），优先级相等时先到的在左
     const visible = () => sortActivityTabs(tabs());
@@ -308,6 +399,7 @@ export default defineComponent({
               ? h(PromptQueuePanel, {
                   key: `${session.sessionId}:prompt-queue`,
                   token: props.token,
+                  flash: queueFlash.value,
                   onError: props.onError,
                 })
               : h(RequestView, {

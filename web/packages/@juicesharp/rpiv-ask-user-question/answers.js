@@ -120,3 +120,27 @@ export function answerText(question, answer) {
   }
   return question.options[answer.option]?.label || "未回答";
 }
+
+/**
+ * 核对页的结构化答案行：勾选项按顺序编 `1.` `2.`…，
+ * 用户自定义输入的内容用 `X.` 标记；未回答返回空数组。
+ */
+export function answerItems(question, answer) {
+  if (!answer || answer.kind === "unanswered") return [];
+  const items = [];
+  if (answer.kind === "multi") {
+    answer.options
+      .map((i) => question.options[i]?.label)
+      .filter(Boolean)
+      .forEach((label) => items.push({ mark: String(items.length + 1), text: label }));
+    if (answer.custom && answer.text) items.push({ mark: "X", text: answer.text });
+    return items;
+  }
+  if (answer.kind === "custom") {
+    if (answer.text) items.push({ mark: "X", text: answer.text });
+    return items;
+  }
+  const label = question.options[answer.option]?.label;
+  if (label) items.push({ mark: "1", text: label });
+  return items;
+}

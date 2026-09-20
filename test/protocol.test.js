@@ -80,7 +80,7 @@ test("protocol validators return valid input unchanged", () => {
   assert.equal(validateServerEvent(event), event);
 });
 
-test("send accepts bounded image blocks and image-only prompts", () => {
+test("send accepts Pi image blocks and image-only prompts without Web size or count limits", () => {
   const action = {
     type: "send",
     sessionId: "session-a",
@@ -89,25 +89,32 @@ test("send accepts bounded image blocks and image-only prompts", () => {
     mode: "followUp",
   };
   assert.equal(validateAction(action), action);
-  assert.throws(() => validateAction({ ...action, images: [{ mimeType: "image/svg+xml", data: "PHN2Zz4=" }] }));
+  assert.equal(
+    validateAction({ ...action, images: [{ mimeType: "image/svg+xml", data: "PHN2Zz4=" }] }).images[0].mimeType,
+    "image/svg+xml",
+  );
   assert.throws(() => validateAction({ ...action, images: [] }));
 });
 
-test("protocol accepts bounded Web-only timing and disclosure state", () => {
+test("protocol accepts Web-only disclosure state and server-owned thinking timings", () => {
   const action = {
     type: "save_ui_state",
     sessionId: "session-a",
-    thinkingTimings: { thought: { startedAt: 10, durationMs: 20 } },
     disclosures: { thought: true, "tool-call": false },
   };
   assert.equal(validateAction(action), action);
+  // 思考时长改为后端权威：浏览器回传 thinkingTimings 会被拒绝。
+  assert.throws(() =>
+    validateAction({ ...action, thinkingTimings: { thought: { startedAt: 10, durationMs: 20 } } }),
+  );
+  const thinkingTimings = { thought: { startedAt: 10, durationMs: 20 } };
   assert.equal(
     validateSnapshot({
       ...snapshot,
-      thinkingTimings: action.thinkingTimings,
+      thinkingTimings,
       disclosures: action.disclosures,
     }).thinkingTimings,
-    action.thinkingTimings,
+    thinkingTimings,
   );
   assert.throws(() =>
     validateAction({ ...action, disclosures: { thought: "open" } }),
@@ -284,6 +291,11 @@ test("protocol accepts paged history prepends and the more_history cursor", () =
   assert.throws(() => validateSnapshot({ ...snapshot, prependMessages: {} }));
   assert.throws(() => validateSnapshot({ ...snapshot, prependMessages: [1] }));
   assert.throws(() => validateSnapshot({ ...snapshot, historyComplete: "yes" }));
+  assert.equal(
+    validateSnapshot({ ...snapshot, historyRevision: 2 }).historyRevision,
+    2,
+  );
+  assert.throws(() => validateSnapshot({ ...snapshot, historyRevision: -1 }));
   assert.throws(() =>
     validateSnapshot({ ...snapshot, prependMessages: new Array(2001).fill({ role: "user" }) }),
   );
@@ -328,9 +340,85 @@ test("protocol validates prompt queue snapshots, additions and guarded deletion"
     text: "转为引导并改写",
   };
   assert.equal(validateAction(update), update);
+  const imageOnly = {
+    ...update,
+    text: "",
+    images: [{ type: "image", mimeType: "image/png", data: "AA==" }],
+  };
+  assert.equal(validateAction(imageOnly), imageOnly);
   assert.throws(() => validateAction({ ...remove, revision: -1 }));
   assert.throws(() => validateAction({ ...remove, id: "" }));
   assert.throws(() => validateSnapshot({ ...snapshot, promptQueue: { ...promptQueue, count: 3 } }));
   assert.throws(() => validateAction({ ...update, kind: "later" }));
   assert.throws(() => validateAction({ ...update, text: "" }));
+});
+
+test("protocol validates agentResources snapshot field (skills/extensions/prompts/definition)", () => {
+  const agentResources = {
+    skills: [
+      {
+        name: "wj-memory",
+        description: "memory",
+        path: "/home/.pi/agent/skills/wj-memory/SKILL.md",
+        source: "global",
+      },
+      {
+        name: "ctx",
+        path: "/pkg/SKILL.md",
+        source: "package",
+        sourceName: "npm:context-mode",
+      },
+    ],
+    extensions: [
+      {
+        name: "pi-atom-web",
+        path: "/home/.pi/agent/extensions/pi-atom-web/index.ts",
+        source: "global",
+      },
+    ],
+    prompts: [
+      {
+        name: "commit",
+        description: "generate commit",
+        path: "/home/.pi/agent/prompts/commit.md",
+        source: "global",
+      },
+    ],
+    definition: {
+      contextFiles: [{ path: "/workspace/AGENTS.md", size: 1234 }],
+      systemPromptFile: "/home/.pi/agent/SYSTEM.md",
+      appendSystemPromptFile: null,
+      settings: [
+        { path: "/home/.pi/agent/settings.json", exists: true },
+        { path: "/workspace/.pi/settings.json", exists: false },
+      ],
+      packages: ["npm:pi-subagents"],
+      projectTrusted: true,
+    },
+  };
+  assert.equal(
+    validateSnapshot({ ...snapshot, agentResources }).agentResources,
+    agentResources,
+  );
+
+  const bad = (patch) =>
+    assert.throws(() =>
+      validateSnapshot({
+        ...snapshot,
+        agentResources: { ...agentResources, ...patch },
+      }),
+    );
+  // 来源标签非法
+  bad({ skills: [{ name: "x", path: "p", source: "bad" }] });
+  // 信任状态必须是布尔
+  bad({ definition: { ...agentResources.definition, projectTrusted: "yes" } });
+  // 上下文文件大小非法
+  bad({
+    definition: {
+      ...agentResources.definition,
+      contextFiles: [{ path: "p", size: -1 }],
+    },
+  });
+  // 列表非数组
+  bad({ extensions: "nope" });
 });

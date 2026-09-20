@@ -165,6 +165,8 @@ export default defineComponent({
                 h(ConversationFeed, {
                   ref: conversationFeed,
                   trace: composer.view === "trace",
+                  token: props.token,
+                  onError: props.onError,
                   onLoadOlderHistory: props.onLoadOlderHistory,
                   onAtBottomChange: (value) => {
                     atBottom.value = value;

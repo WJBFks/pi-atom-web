@@ -11,6 +11,7 @@ test("session state is isolated by workspace and session and survives a new stor
     const store = createSessionStateStore({ cwd, sessionId: "session-1", debounceMs: 5 });
     assert.deepEqual(await store.load(), {
       schemaVersion: 1, toolTimings: {}, thinkingTimings: {}, disclosures: {}, displayRecords: [],
+      turnProcessing: {},
     });
     store.update((state) => {
       state.toolTimings.tool = { startedAt: 10, endedAt: 30, durationMs: 20 };
@@ -84,3 +85,40 @@ test("status and interrupted display records survive a persist and restore round
   }
 });
 
+// 每一轮的处理时长要落盘：刷新后「已完成（时长）」才能继续贴在对应轮次的输出下方。
+test("turnProcessing survives a persist and restore round trip", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-atom-web-turn-"));
+  try {
+    const store = await createSessionStateStore({ cwd, sessionId: "turns" });
+    store.replace({
+      schemaVersion: 1,
+      toolTimings: {},
+      thinkingTimings: {},
+      disclosures: {},
+      displayRecords: [],
+      turnProcessing: {
+        "turns:branch:a": { startedAt: 100, durationMs: 90_000 },
+        "turns:branch:b": { startedAt: 200, durationMs: 5_000 },
+        // 非数值的项必须被丢弃，不能让脏数据进内存
+        "turns:branch:bad": { startedAt: "x", durationMs: 1 },
+      },
+    });
+    await store.flush();
+    await store.close();
+
+    const reopened = await createSessionStateStore({ cwd, sessionId: "turns" });
+    const state = await reopened.load();
+    await reopened.close();
+    assert.deepEqual(Object.keys(state.turnProcessing).sort(), [
+      "turns:branch:a",
+      "turns:branch:b",
+    ]);
+    assert.deepEqual(state.turnProcessing["turns:branch:a"], {
+      startedAt: 100,
+      durationMs: 90_000,
+      status: "done",
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

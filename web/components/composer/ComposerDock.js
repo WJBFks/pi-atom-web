@@ -22,6 +22,7 @@ import ModelPicker from "./ModelPicker.js";
 import ThinkingPicker from "./ThinkingPicker.js";
 import SessionStatus from "../status/SessionStatus.js";
 import { PreviewImage } from "../conversation/MessageItem.js";
+import { readImageFiles } from "./image-files.js";
 
 const assistantText = (message) =>
   message?.role === "assistant"
@@ -51,40 +52,11 @@ export default defineComponent({
       observer,
       alive = true;
     const controllers = new Set();
-    const supportedImages = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-    const readImage = (file) =>
-      new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onerror = () => reject(new Error(`无法读取图片：${file.name}`));
-        reader.onload = () => {
-          const value = String(reader.result || "");
-          resolve({
-            name: file.name || "粘贴的图片",
-            mimeType: file.type,
-            data: value.slice(value.indexOf(",") + 1),
-            url: value,
-            size: file.size,
-          });
-        };
-        reader.readAsDataURL(file);
-      });
     const addImages = async (files) => {
       const incoming = [...files].filter((file) => file.type?.startsWith("image/"));
       if (!incoming.length) return;
-      if (composer.images.length + incoming.length > 4)
-        return props.onError?.(new Error("最多添加 4 张图片"));
-      let total = composer.images.reduce((sum, image) => sum + image.size, 0);
-      for (const file of incoming) {
-        if (!supportedImages.has(file.type))
-          return props.onError?.(new Error(`不支持的图片格式：${file.type || file.name}`));
-        if (file.size > 8 * 1024 * 1024)
-          return props.onError?.(new Error(`单张图片不能超过 8 MiB：${file.name}`));
-        total += file.size;
-      }
-      if (total > 16 * 1024 * 1024)
-        return props.onError?.(new Error("图片总大小不能超过 16 MiB"));
       try {
-        for (const image of await Promise.all(incoming.map(readImage))) composer.addImage(image);
+        for (const image of await readImageFiles(incoming)) composer.addImage(image);
         resize();
       } catch (error) {
         report(error);
@@ -527,7 +499,7 @@ export default defineComponent({
                   ref: imageInput,
                   class: "image-input",
                   type: "file",
-                  accept: "image/png,image/jpeg,image/gif,image/webp",
+                  accept: "image/*",
                   multiple: true,
                   onChange: (event) => {
                     addImages(event.target.files || []);

@@ -49,6 +49,8 @@ import {
 } from "../web/components/layout/ColumnResizer.js";
 import { VIEW_TABS, nextTab } from "../web/components/layout/ViewTabs.js";
 import { contextSummaries } from "../web/views/ContextView.js";
+import { compactionPreview } from "../web/components/conversation/MessageItem.js";
+import { compactionDoneText } from "../web/components/conversation/CompactionStatus.js";
 import {
   SETTINGS_SECTIONS,
   nextSection,
@@ -558,6 +560,36 @@ test("history merge keeps loaded turns when the server window slides", () => {
   assert.deepEqual(slid.map((m) => m.id), ["t1", "t2", "t3", "t4"]);
   assert.deepEqual(mergeHistory([], [turn("x")]).map((m) => m.id), ["x"]);
   assert.deepEqual(mergeHistory([turn("x")], []).map((m) => m.id), ["x"]);
+});
+
+test("a new history revision replaces the abandoned session-tree branch", () => {
+  setActivePinia(createPinia());
+  const store = useConversationStore();
+  store.applySnapshot({
+    historyRevision: 0,
+    messages: [
+      { id: "common", role: "assistant", content: "共同历史" },
+      { id: "old-user", role: "user", content: "喂", branch: { index: 1, count: 2, prev: null, next: "new-user" } },
+      { id: "old-answer", role: "assistant", content: "旧回答" },
+    ],
+  });
+
+  store.applyPatch({
+    historyRevision: 1,
+    messages: [
+      { id: "common", role: "assistant", content: "共同历史" },
+      { id: "new-user", role: "user", content: "hello", branch: { index: 2, count: 2, prev: "old-user", next: null } },
+      { id: "new-answer", role: "assistant", content: "新回答" },
+    ],
+  });
+
+  assert.equal(store.historyRevision, 1);
+  assert.deepEqual(store.messages.map((message) => message.id), [
+    "common",
+    "new-user",
+    "new-answer",
+  ]);
+  assert.equal(store.messages[1].branch.index, 2);
 });
 
 test("prepended history is merged in front without touching rendered entries", () => {
@@ -1170,12 +1202,13 @@ test("top tabs cycle in order and with the keyboard, skipping disabled ones", ()
 test("settings sections cycle in the sidebar with the keyboard", () => {
   assert.deepEqual(
     SETTINGS_SECTIONS.map((item) => item.id),
-    ["appearance", "session", "connection", "behaviour"],
+    ["appearance", "session", "connection", "behaviour", "skills", "extensions", "prompts", "definition"],
   );
   assert.equal(nextSection("appearance", "ArrowDown"), "session");
-  assert.equal(nextSection("appearance", "ArrowUp"), "behaviour");
+  assert.equal(nextSection("appearance", "ArrowUp"), "definition");
   assert.equal(nextSection("connection", "Home"), "appearance");
-  assert.equal(nextSection("session", "End"), "behaviour");
+  assert.equal(nextSection("session", "End"), "definition");
+  assert.equal(nextSection("definition", "ArrowDown"), "appearance");
   assert.equal(nextSection("session", "Tab"), null);
   assert.equal(nextSection("unknown", "ArrowDown"), null);
 });
@@ -1424,4 +1457,17 @@ test("activity tabs sort by priority desc, then by arrival time asc", () => {
     ]).map((t) => t.id),
     ["a", "b", "c"],
   );
+});
+
+test("compaction block preview and completion line use the host numbers", () => {
+  // 摘要行：压缩前 token 数带千分位；缺字段/非法值时退化为固定文案，不编造数字。
+  assert.equal(compactionPreview(150722), "从150,722个token中压缩");
+  assert.equal(compactionPreview(1234567), "从1,234,567个token中压缩");
+  assert.equal(compactionPreview(undefined), "上下文已压缩");
+  assert.equal(compactionPreview(null), "上下文已压缩");
+  assert.equal(compactionPreview(-1), "上下文已压缩");
+  // 完成行：耗时沿用助手侧同一套格式（不足一分钟只显示秒）。
+  assert.equal(compactionDoneText(168000), "压缩完成（耗时2分钟48秒）");
+  assert.equal(compactionDoneText(42000), "压缩完成（耗时42秒）");
+  assert.equal(compactionDoneText(0), "压缩完成（耗时0秒）");
 });

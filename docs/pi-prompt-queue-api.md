@@ -175,6 +175,7 @@ interface PromptQueueItem {
   kind: "steer" | "followUp";
   index: number;
   text: string;
+  images: Array<{ type: "image"; mimeType: string; data: string }>;
 }
 
 interface PromptQueueSnapshot {
@@ -196,7 +197,8 @@ interface PromptQueueSnapshot {
   "type": "queue_add",
   "sessionId": "当前会话 ID",
   "kind": "steer",
-  "text": "请先检查失败日志"
+  "text": "请先检查失败日志",
+  "images": []
 }
 ```
 
@@ -222,7 +224,7 @@ Web 普通 Composer 新增的 Prompt 固定使用 `followUp`。活动组件不�
 
 ### 编辑或转换单条
 
-`queue_update_item` 同时负责修改文本，以及在 Follow-up（排队）和 Steering（引导）间转换：
+`queue_update_item` 同时负责修改文字和图片，以及在 Follow-up（排队）和 Steering（引导）间转换：
 
 ```json
 {
@@ -231,7 +233,8 @@ Web 普通 Composer 新增的 Prompt 固定使用 `followUp`。活动组件不�
   "id": "followUp:0:1abcxyz",
   "revision": 4,
   "kind": "steer",
-  "text": "改写后立即引导当前轮"
+  "text": "改写后立即引导当前轮",
+  "images": [{ "type": "image", "mimeType": "image/png", "data": "...base64..." }]
 }
 ```
 
@@ -268,7 +271,7 @@ Web 普通 Composer 新增的 Prompt 固定使用 `followUp`。活动组件不�
 }
 ```
 
-同类别编辑会保留该项在类别内的位置；跨类别转换会把它追加到目标类别末尾。请求中的 `text` 去除首尾空白后不能为空。
+同类别编辑会保留该项在类别内的位置；跨类别转换会把它追加到目标类别末尾。文字可以为空，但 `text` 与 `images` 不能同时为空，因此纯图片队列项是合法输入。转换时如未传 `images`，兼容层保留原附件。
 
 ### 删除单条
 
@@ -311,8 +314,10 @@ Pi 没有单条编辑、移动或删除原语，因此兼容层会执行“校�
 
 ## 限制与兼容性
 
-- 队列项 ID 由类别、当前下标和文本摘要派生，只在对应 revision 下有效；它不是 Pi 的持久 ID。
-- Pi 的查看和清空 API只返回文本。单条删除重建队列时无法保留原消息的图片附件，因此当前 Web 队列面板只允许添加纯文本。
+- 队列项 ID 由类别、当前下标和完整文字/图片摘要派生，只在对应 revision 下有效；它不是 Pi 的持久 ID。
+- Pi 的公开查看和清空 API 只返回文本。兼容层在当前 Pi 运行时读取 `AgentSession.agent` 的真实 steering/follow-up message queue 以保留图片，旧运行时才回退为纯文本。重建时使用 `steer(text, images)` / `followUp(text, images)`，删除、编辑和转换不会丢附件。
+- Pi 0.85 的公开文本镜像不会在纯图片项被消费时移除；兼容层在 user `message_start` 时以真实 agent queue 校正并发布队列。
+- Web 不额外限制图片数量、单张大小或总大小；图片能否被当前模型和 provider 接受由 Pi 的运行时能力决定。
 - 单条删除不覆盖 Interactive Mode 独立维护的压缩期队列。
 - 运行时捕获依赖 `AgentSession._bindExtensionCore()`。模块使用 `Symbol.for()` 防止 `/reload` 重复包装，并在不支持该内部接口时保持 Web 其他能力可用。
 - Pi 升级后应重新核对 `AgentSession` 的队列方法、事件结构和扩展绑定时机。

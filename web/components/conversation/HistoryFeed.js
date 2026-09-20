@@ -2,6 +2,7 @@ import { defineComponent, h } from "vue";
 import { messageId, useConversationStore } from "../../stores/conversation.js";
 import { useSessionStore } from "../../stores/session.js";
 import MessageItem from "./MessageItem.js";
+import { formatProcessingDuration } from "./ProcessingStatus.js";
 import TurnGroup from "./TurnGroup.js";
 import { groupMessages } from "./turnGroups.js";
 
@@ -17,20 +18,60 @@ const visibleInTrace = (message) =>
 
 export default defineComponent({
   name: "HistoryFeed",
-  props: { trace: Boolean },
+  props: { trace: Boolean, token: String, onError: Function },
   setup(props) {
     const conversation = useConversationStore();
     const session = useSessionStore();
-    const render = (message, key) =>
-      h(MessageItem, { key, message, tools: conversation.historyTools });
+    // 每一轮的状态徽标：服务端按该轮**最后一条 assistant 消息**的客户端 id 结算
+    // （`<sessionId>:branch:<entryId>`，与 history 消息 id 同格式）并落盘，
+    // 刷新后依旧显示。徽标渲染在该消息 <article class="message"> 内、
+    // .body 之后（MessageItem 的 status 插槽），而不是 article 外的独立条目。
+    const turnStatus = (message) => {
+      const id = messageId(message);
+      const timing = id ? conversation.turnProcessing[id] : null;
+      if (!timing) return null;
+      const interrupted = timing.status === "interrupted";
+      return {
+        interrupted,
+        // 完成时刻：服务端以 processingStartedAt（prompt 被接管时）为起点，
+        // 轮次结束用 durationMs 结算，两者相加即完成时刻。
+        completedAt: timing.startedAt + timing.durationMs,
+        durationMs: timing.durationMs,
+        text: `${interrupted ? "已中断" : "已完成"}（${formatProcessingDuration(timing.durationMs)}）`,
+      };
+    };
+    const render = (message, key, withStatus = true) =>
+      h(MessageItem, {
+        key,
+        message,
+        tools: conversation.historyTools,
+        // 用户状态行的编辑/分支切换动作要用凭证；随消息一起透传。
+        token: props.token,
+        onError: props.onError,
+        // 组内消息默认不挂徽标：最终输出的「拆分前半段」与最终消息共用同一 id，
+        // 若都允许查表，同一徽标会在折叠组内（上方）和最终输出（下方）各出现一次。
+        status: withStatus ? turnStatus(message) : null,
+      });
     const renderEntry = (entry, index) => {
       if (entry.kind !== "group") {
         const key = entry.groupKey
           ? `${entry.groupKey}:final`
           : messageId(entry.message) ?? `m${index}`;
+        // 独立消息（含某组的最终输出）：id 命中 turnProcessing 就挂徽标。
         return render(entry.message, key);
       }
       const { group, keepOpen } = entry;
+      // 中断轮次：最终输出为空、整轮都在组内，徽标改挂组内最后一条 assistant；
+      // 正常轮次的徽标挂在组外最终输出上，组内一律不挂。
+      let lastAssistantId = null;
+      if (!group.finalMessage) {
+        for (let i = group.messages.length - 1; i >= 0; i -= 1) {
+          if (group.messages[i]?.role === "assistant") {
+            lastAssistantId = messageId(group.messages[i]);
+            break;
+          }
+        }
+      }
       return h(
         TurnGroup,
         {
@@ -43,7 +84,11 @@ export default defineComponent({
         {
           default: () =>
             group.intermediate.map((message, position) =>
-              render(message, `${group.key}:${messageId(message) ?? position}`),
+              render(
+                message,
+                `${group.key}:${messageId(message) ?? position}`,
+                messageId(message) === lastAssistantId,
+              ),
             ),
         },
       );

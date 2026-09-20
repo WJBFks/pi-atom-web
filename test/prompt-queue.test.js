@@ -27,9 +27,9 @@ class FakeSession {
   }
   getSteeringMessages() { return this.steering; }
   getFollowUpMessages() { return this.followUps; }
-  async steer(text) { this.steering.push(text); this.emitQueue(); }
-  async followUpMessage(text) { this.followUps.push(text); this.emitQueue(); }
-  async followUp(text) { return this.followUpMessage(text); }
+  async steer(text, images) { this.steering.push(images?.length ? { text, images } : text); this.emitQueue(); }
+  async followUpMessage(text, images) { this.followUps.push(images?.length ? { text, images } : text); this.emitQueue(); }
+  async followUp(text, images) { return this.followUpMessage(text, images); }
   clearQueue() {
     const removed = { steering: [...this.steering], followUp: [...this.followUps] };
     this.steering = [];
@@ -48,9 +48,65 @@ test("prompt queue snapshot exposes both queues, stable item metadata and total 
     kind: "steer",
     index: 0,
     text: "立即修正",
+    images: [],
   });
   assert.equal(snapshot.followUp[1].kind, "followUp");
   assert.equal(snapshot.followUp[1].index, 1);
+});
+
+test("prompt queue snapshot exposes images and accepts image-only messages", () => {
+  const image = { type: "image", mimeType: "image/png", data: "AA==" };
+  const snapshot = promptQueueSnapshot([
+    { role: "user", content: [image], timestamp: 1 },
+  ], [{ text: "说明", images: [image] }], 2);
+  assert.equal(snapshot.steering[0].text, "");
+  assert.deepEqual(snapshot.steering[0].images, [image]);
+  assert.equal(snapshot.followUp[0].text, "说明");
+  assert.deepEqual(snapshot.followUp[0].images, [image]);
+});
+
+test("queue bridge preserves images across editing, conversion, rebuilding and deletion", async () => {
+  const image = { type: "image", mimeType: "image/png", data: "AA==" };
+  const bridge = createPromptQueueBridge();
+  const sessionManager = {};
+  const session = new FakeSession(sessionManager);
+  session.followUps = [{ text: "", images: [image] }];
+  bridge.attach(session);
+  const before = bridge.snapshot(sessionManager);
+  const changed = await bridge.update(sessionManager, {
+    id: before.followUp[0].id,
+    revision: before.revision,
+    kind: "steer",
+    text: "看图",
+    images: [image],
+  });
+  assert.equal(changed.updated.text, "看图");
+  assert.deepEqual(changed.updated.images, [image]);
+  const removed = await bridge.remove(sessionManager, {
+    id: changed.updated.id,
+    revision: changed.queue.revision,
+  });
+  assert.deepEqual(removed.removed.images, [image]);
+});
+
+test("image-only queue consumption follows Pi's authoritative agent queue", async () => {
+  const image = { type: "image", mimeType: "image/png", data: "AA==" };
+  const bridge = createPromptQueueBridge();
+  const sessionManager = {};
+  const session = new FakeSession(sessionManager);
+  session.followUps = [""];
+  session.agent = {
+    steeringQueue: { messages: [] },
+    followUpQueue: { messages: [{ role: "user", content: [image] }] },
+  };
+  bridge.attach(session);
+  assert.equal(bridge.snapshot(sessionManager).count, 1);
+  session.agent.followUpQueue.messages = [];
+  for (const listener of session.listeners)
+    listener({ type: "message_start", message: { role: "user", content: [image] } });
+  await Promise.resolve();
+  assert.equal(bridge.snapshot(sessionManager).count, 0);
+  assert.deepEqual(session.followUps, []);
 });
 
 test("queue bridge listens for updates, adds messages and deletes one with full return data", async () => {
@@ -214,6 +270,38 @@ test("queue bridge waits for prompt preflight so a second submit becomes follow-
 
   assert.deepEqual(session.started, ["第一条"]);
   assert.deepEqual(session.followUps, ["第二条"]);
+});
+
+test("queue snapshot contains images when Pi emits text-only queue_update before enqueueing the full message", async () => {
+  const image = { type: "image", mimeType: "image/png", data: "AA==" };
+  class PiOrderSession extends FakeSession {
+    isStreaming = true;
+    agent = {
+      steeringQueue: { messages: [] },
+      followUpQueue: { messages: [] },
+    };
+    async prompt(text, options) {
+      this.followUps.push(text);
+      this.emitQueue();
+      this.agent.followUpQueue.messages.push({
+        role: "user",
+        content: [{ type: "text", text }, ...(options.images || [])],
+        timestamp: Date.now(),
+      });
+      options.preflightResult?.(true);
+    }
+  }
+  const bridge = createPromptQueueBridge();
+  const sessionManager = {};
+  const session = new PiOrderSession(sessionManager);
+  bridge.attach(session);
+
+  await bridge.submit(sessionManager, [image], { mode: "followUp" });
+  await Promise.resolve();
+
+  const queue = bridge.snapshot(sessionManager);
+  assert.equal(queue.followUp[0].text, "");
+  assert.deepEqual(queue.followUp[0].images, [image]);
 });
 
 test("queue bridge returns prompt preflight failures to the action caller", async () => {

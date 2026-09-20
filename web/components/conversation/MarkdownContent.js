@@ -40,6 +40,6 @@ export default defineComponent({
       clearTimeout(resetTimer);
     });
     return () =>
-      h("div", { class: "body", innerHTML: html.value, onClick: copy });
+      h("div", { class: "markdown", innerHTML: html.value, onClick: copy });
   },
 });

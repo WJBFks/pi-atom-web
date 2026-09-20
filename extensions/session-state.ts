@@ -12,6 +12,7 @@ function emptyState() {
     thinkingTimings: {},
     disclosures: {},
     displayRecords: [],
+    turnProcessing: {},
   };
 }
 
@@ -29,6 +30,28 @@ function timingMap(value) {
       ...(Number.isFinite(endedAt) ? { endedAt } : {}),
       durationMs,
     };
+  }
+  return result;
+}
+
+/**
+ * 每一轮的处理时长：key = 该轮**最终输出**那条消息的客户端 id
+ * （`<sessionId>:branch:<entryId>`，与 history 里消息的 id 同格式），
+ * 值为 `{ startedAt, durationMs }`。前端据此在每轮输出下方显示「已完成（时长）」，
+ * 刷新后从磁盘恢复。
+ */
+function turnProcessingMap(value) {
+  const result = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+  for (const [id, timing] of Object.entries(value).slice(-MAX_ENTRIES)) {
+    if (!id || id.length > 1024 || !timing || typeof timing !== "object") continue;
+    const startedAt = Number(timing.startedAt);
+    const durationMs = Number(timing.durationMs);
+    if (!Number.isFinite(startedAt) || !Number.isFinite(durationMs) || durationMs < 0)
+      continue;
+    const status =
+      timing.status === "interrupted" ? "interrupted" : "done";
+    result[id] = { startedAt, durationMs, status };
   }
   return result;
 }
@@ -56,6 +79,7 @@ function normalize(value, sessionId) {
     thinkingTimings: timingMap(value.thinkingTimings),
     disclosures,
     displayRecords,
+    turnProcessing: turnProcessingMap(value.turnProcessing),
   };
 }
 

@@ -358,6 +358,10 @@ test("clearing every checkbox returns the multi question to unanswered", async (
   await page.getByRole("button", { name: "核对与提交" }).click();
   await expect(page.locator(".ask-review").first()).toContainText("B");
   await expect(page.locator(".ask-review").nth(1)).toContainText("自定义补充");
+  // 核对页：勾选项按 1. 编号，自定义输入用 X.；修改按钮在标题行右侧
+  await expect(page.locator(".ask-review").first().locator(".answer-mark").first()).toHaveText("1.");
+  await expect(page.locator(".ask-review").nth(1).locator(".answer-mark").first()).toHaveText("X.");
+  await expect(page.locator(".ask-review").first().locator(".ask-review-head button")).toHaveText("修改");
   await page.locator("[data-ask-submit]").click();
   await expect.poll(() => web.actions.length).toBe(1);
   expect(web.actions[0].value.draft).toMatchObject([
@@ -570,7 +574,7 @@ test("single-select preview keeps the option's line structure", async ({ page, w
   });
   const errors = await open(page, web);
   await page.locator(".ask-preview summary").first().click();
-  const body = page.locator(".ask-preview").first().locator(".body");
+  const body = page.locator(".ask-preview").first().locator(".markdown");
   await expect(body).toContainText("选项区");
 
   const rendered = await body.evaluate((node) => {
@@ -608,7 +612,7 @@ test("single-select preview keeps the option's line structure", async ({ page, w
 
   // 叶子块保留空白；容器（引用/松散列表项）不能保留，否则内部换行会变成空行
   await page.locator(".ask-preview summary").nth(1).click();
-  const listBody = page.locator(".ask-preview").nth(1).locator(".body");
+  const listBody = page.locator(".ask-preview").nth(1).locator(".markdown");
   await expect(listBody).toContainText("第一项");
   const listWhitespace = await listBody.evaluate((node) => ({
     li: getComputedStyle(node.querySelector("li")).whiteSpace,
@@ -694,6 +698,13 @@ test("switching tabs keeps every question's draft intact", async ({ page, web })
   await expect(page.locator(".ask-review").first()).toContainText("A");
   await expect(page.locator(".ask-review").first()).toContainText("第一题的自由回答");
   await expect(page.locator(".ask-review").nth(1)).toContainText("D");
+  // 勾选项依次 1. 编号，自定义输入用 X. 标记
+  const reviewFirst = page.locator(".ask-review").first();
+  await expect(reviewFirst.locator(".answer-mark").nth(0)).toHaveText("1.");
+  await expect(reviewFirst.locator(".answer-text").nth(0)).toHaveText("A");
+  await expect(reviewFirst.locator(".answer-mark").nth(1)).toHaveText("X.");
+  await expect(reviewFirst.locator(".answer-text").nth(1)).toHaveText("第一题的自由回答");
+  await expect(page.locator(".ask-review").nth(1).locator(".answer-mark").nth(0)).toHaveText("1.");
 
   await page.locator("[data-ask-submit]").click();
   await expect.poll(() => web.actions.length).toBe(1);
@@ -1347,9 +1358,12 @@ test("submitted prompt appears before model response and delayed waiting status 
     "需要立即显示的消息",
     { timeout: 150 },
   );
-  await expect(page.locator(".response-waiting")).toHaveCount(0);
-  await expect(page.locator(".response-waiting")).toContainText(
-    /正在等待模型响应\.\.\. \([12]s\)/,
+  // 执行状态：已提交但还没有输出 → 「正在等待模型响应...」+ 计时
+  // 注意：live 区里同时有用户状态行（同样带 .processing-status），这里只断言运行态那行
+  await expect(
+    page.locator('#message-live .processing-status[role="status"]'),
+  ).toContainText(
+    /正在等待模型响应\.\.\.（[12]秒）/,
     { timeout: 2500 },
   );
 
@@ -1358,8 +1372,13 @@ test("submitted prompt appears before model response and delayed waiting status 
     responseWaitStartedAt: null,
     liveMessage: { id: "assistant-start", role: "assistant", content: "开始" },
   });
-  await expect(page.locator(".response-waiting")).toHaveCount(0);
   await expect(page.locator("#message-live")).toContainText("开始");
+  // 有 live 消息后不再是「等待模型响应」
+  await expect(
+    page.locator('#message-live .processing-status[role="status"]'),
+  ).not.toContainText(
+    "正在等待模型响应",
+  );
 
   web.setActionHandler(async () => {
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1373,6 +1392,246 @@ test("submitted prompt appears before model response and delayed waiting status 
   );
   await expect(page.locator("#message-live .message.user")).toHaveCount(0);
   await expect(page.locator("#prompt")).toHaveValue("失败时撤销的消息");
+});
+
+test("message markdown blocks do not nest a second .body inside the message body", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    messages: [
+      { id: "nm-u1", role: "user", content: "问题" },
+      {
+        id: "nm-a1",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先想一想" },
+          { type: "text", text: "中间说明" },
+          { type: "toolCall", id: "nm-t1", name: "bash", arguments: { command: "ls" } },
+        ],
+      },
+      {
+        id: "nm-r1",
+        role: "toolResult",
+        toolCallId: "nm-t1",
+        toolName: "bash",
+        content: [{ type: "text", text: "输出" }],
+      },
+    ],
+  });
+  const failures = [];
+  page.on("pageerror", (error) => failures.push(error.message));
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  await expect(page.locator("#message-history")).toContainText("中间说明");
+  // 消息体内的 markdown 用中性容器，不应出现 .body 套 .body（含思考块）
+  await expect(page.locator("#message-history .body .body")).toHaveCount(0);
+  await expect(
+    page.locator("#message-history .body > .markdown").first(),
+  ).toHaveCount(1);
+  expect(failures).toEqual([]);
+});
+
+test("user prompt status row offers copy, in-place edit and branch switching", async ({
+  page,
+  web,
+  context,
+}) => {
+  web.setSnapshot({
+    messages: [
+      {
+        id: "session-browser:branch:e-u1",
+        role: "user",
+        content: "第一条提问",
+        timestamp: 1758191932000,
+        branch: { index: 1, count: 2, prev: null, next: "e-u2" },
+      },
+      { id: "session-browser:branch:e-a1", role: "assistant", content: "回答" },
+      {
+        id: "session-browser:branch:e-u2",
+        role: "user",
+        content: "第二条提问",
+        timestamp: 1758192032000,
+        branch: { index: 2, count: 2, prev: "e-u1", next: null },
+      },
+      { id: "session-browser:branch:e-a2", role: "assistant", content: "第二个回答" },
+    ],
+  });
+  // 后端可能在 HTTP action 返回前已经依次发布 restarting:true/false。
+  // 前端不得在响应后重新把状态写回 true。
+  web.setActionHandler(async (action, server) => {
+    if (action.type === "edit_user_message") {
+      server.publish({ restarting: true });
+      server.publish({ restarting: false });
+    }
+    return {};
+  });
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const failures = [];
+  page.on("pageerror", (error) => failures.push(error.message));
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+
+  const message = page.locator("#message-history .message.user").first();
+  await expect(message).toContainText("第一条提问");
+  const status = message.locator(".user-prompt");
+  await expect(status).toHaveCount(1);
+  // 状态行是 article 的子节点、气泡（.body）的兄弟
+  await expect(status).toHaveCount(1);
+  expect(await status.evaluate((el) => el.previousElementSibling?.className)).toBe(
+    "body user-bubble",
+  );
+  // 时间（HH:MM）+ 分支计数 1/2，< 禁用、> 可用
+  await expect(status.locator(".user-prompt-time")).toHaveText(/^\d{2}:\d{2}$/);
+  await expect(status.locator(".user-prompt-branch-count")).toHaveText("1/2");
+  // 已完成的会话里每一轮的用户输入都有自己的状态行与计数：
+  // 第 2 条（较新的那一轮）显示 2/2、且 < 可用 / > 禁用。
+  await expect(page.locator("#message-history .message.user")).toHaveCount(2);
+  const newer = page.locator("#message-history .message.user").nth(1);
+  await expect(newer).toContainText("第二条提问");
+  await expect(newer.locator(".user-prompt-branch-count")).toHaveText("2/2");
+  await expect(newer.locator(".user-prompt-branch-step button").first()).toBeEnabled();
+  await expect(newer.locator(".user-prompt-branch-step button").nth(1)).toBeDisabled();
+  const steps = status.locator(".user-prompt-branch-step button");
+  await expect(steps.first()).toBeDisabled();
+  await expect(steps.nth(1)).toBeEnabled();
+  // 按钮平时隐藏，hover 整条消息时淡入
+  const actions = status.locator(".user-prompt-actions");
+  await expect(actions).toHaveCSS("opacity", "0");
+  await message.hover();
+  await expect(actions).toHaveCSS("opacity", "1");
+  // hover 时间：完整时间戳浮层
+  await status.locator(".user-prompt-time").hover();
+  await expect(status.locator(".status-tip")).toHaveText(
+    /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/,
+  );
+  // 复制提示词原文
+  await status.locator(".user-prompt-action button").nth(1).click();
+  await expect
+    .poll(async () =>
+      (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n"),
+    )
+    .toBe("第一条提问");
+  // 切到第 2 条会话
+  await steps.nth(1).click();
+  await expect
+    .poll(() =>
+      web.actions.some(
+        (action) => action.type === "navigate_branch" && action.entryId === "e-u2",
+      ),
+    )
+    .toBe(true);
+  // 原位编辑：气泡就地换成编辑框（预填原文），提交走 edit_user_message
+  await status.locator(".user-prompt-action button").first().click();
+  const editor = message.locator(".user-edit-input");
+  await expect(editor).toHaveValue("第一条提问");
+  await editor.fill("改过的提问");
+  await message.locator(".user-edit-actions .primary").click();
+  await expect
+    .poll(() =>
+      web.actions.some(
+        (action) =>
+          action.type === "edit_user_message" &&
+          action.entryId === "e-u1" &&
+          action.text === "改过的提问",
+      ),
+    )
+    .toBe(true);
+  await expect(message.locator(".user-prompt-restarting")).toHaveCount(0);
+  await expect(message.locator(".user-edit-input")).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
+
+test("session-tree navigation replaces the old branch and shows the new branch index", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    historyRevision: 0,
+    messages: [
+      { id: "session-browser:branch:common", role: "assistant", content: "共同历史" },
+      {
+        id: "session-browser:branch:old-user",
+        role: "user",
+        content: "喂",
+        branch: { index: 1, count: 2, prev: null, next: "new-user" },
+      },
+      { id: "session-browser:branch:old-answer", role: "assistant", content: "旧回答" },
+    ],
+  });
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  await expect(page.locator("#message-history")).toContainText("喂");
+
+  web.publish({
+    historyRevision: 1,
+    messages: [
+      { id: "session-browser:branch:common", role: "assistant", content: "共同历史" },
+      {
+        id: "session-browser:branch:new-user",
+        role: "user",
+        content: "hello",
+        branch: { index: 2, count: 2, prev: "old-user", next: null },
+      },
+      { id: "session-browser:branch:new-answer", role: "assistant", content: "新回答" },
+    ],
+  });
+
+  await expect(page.locator("#message-history")).not.toContainText("旧回答");
+  const user = page.locator("#message-history .message.user");
+  await expect(user).toHaveCount(1);
+  await expect(user).toContainText("hello");
+  await expect(user.locator(".user-prompt-branch-count")).toHaveText("2/2");
+});
+
+test("turn badge copy survives a hanging clipboard API via the execCommand fallback", async ({
+  page,
+  web,
+  context,
+}) => {
+  web.setSnapshot({
+    messages: [
+      { id: "u1", role: "user", content: "问题" },
+      { id: "a1", role: "assistant", content: "第一行输出\n\n第二行输出" },
+    ],
+    turnProcessing: {
+      a1: { startedAt: 1758191237000, durationMs: 168000, status: "done" },
+    },
+  });
+  // 模拟 Windows 剪贴板被锁：writeText 永远不 resolve（不 reject 也不 resolve）。
+  // 修复前：copy() 永远挂起、无反馈；修复后：800ms 超时后走 execCommand 兜底。
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await context.addInitScript(() => {
+    const original = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: () => new Promise(() => {}),
+        readText: () => (original ? original.readText() : Promise.reject(new Error("no clipboard"))),
+      },
+      configurable: true,
+    });
+  });
+  const failures = [];
+  page.on("pageerror", (error) => failures.push(error.message));
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  const badge = page.locator(".turn-status");
+  await expect(badge).toHaveCount(1);
+  // hover 时间文字：下方弹出「开始/结束时间 + 总耗时」三行浮层
+  await badge.locator(".turn-status-time").hover();
+  await expect(badge.locator(".status-tip")).toHaveText(
+    /^开始时间：\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}结束时间：\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}总耗时：\d+/,
+  );
+  await badge.locator(".turn-status-copy button").click();
+  // 兜底成功后：图标切「已复制」，剪贴板拿到完整最终输出（Windows 会把 LF 规范化为 CRLF）
+  await expect
+    .poll(
+      async () =>
+        (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n"),
+      { timeout: 5000 },
+    )
+    .toBe("第一行输出\n\n第二行输出");
+  await expect(badge.locator(".turn-status-copy button")).toHaveAttribute(
+    "aria-label",
+    "已复制",
+  );
+  expect(failures).toEqual([]);
 });
 
 test("busy prompt clears immediately and appears only in the follow-up queue", async ({
@@ -1736,9 +1995,9 @@ test("top tabs switch between conversation, context and settings", async ({
   await expect(tab("settings")).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#view-panel-settings")).toBeVisible();
   await expect(page.locator("#view-panel-feed")).toBeHidden();
-  // 设置页是左侧分类导航 + 右侧内容
-  await expect(page.locator(".settings-nav [role='tab']")).toHaveCount(4);
-  for (const label of ["外观", "会话信息", "连接与实例", "行为"])
+  // 设置页是左侧分类导航 + 右侧内容（含 Agent 定义四个只读分类）
+  await expect(page.locator(".settings-nav [role='tab']")).toHaveCount(8);
+  for (const label of ["外观", "会话信息", "连接与实例", "行为", "技能", "扩展", "模板", "定义"])
     await expect(page.locator(".settings-nav")).toContainText(label);
   await expect(page.locator("#settings-panel")).toContainText("主题");
   await page.locator('[data-section="session"]').click();
@@ -1747,6 +2006,16 @@ test("top tabs switch between conversation, context and settings", async ({
   await expect(page.locator("#settings-panel")).toContainText("连接凭证");
   await page.locator('[data-section="behaviour"]').click();
   await expect(page.locator("#settings-panel")).toContainText("自动折叠中间过程");
+
+  // fixture 没有 agentResources：四个资源分类显示空状态提示
+  await page.locator('[data-section="skills"]').click();
+  await expect(page.locator("#settings-panel")).toContainText("未加载任何技能");
+  await page.locator('[data-section="extensions"]').click();
+  await expect(page.locator("#settings-panel")).toContainText("未加载任何扩展");
+  await page.locator('[data-section="prompts"]').click();
+  await expect(page.locator("#settings-panel")).toContainText("未加载任何 Prompt 模板");
+  await page.locator('[data-section="definition"]').click();
+  await expect(page.locator("#settings-panel")).toContainText("未提供定义信息");
 
   await tab("context").click();
   await expect(page.locator("#view-panel-context")).toContainText("上下文构成");
@@ -1762,6 +2031,64 @@ test("top tabs switch between conversation, context and settings", async ({
   await expect(tab("settings")).toHaveAttribute("aria-selected", "true");
   await tab("chat").click();
   await expect(page.locator("#message-history")).toContainText("历史消息");
+});
+
+test("settings lists agent skills, extensions, prompt templates and definition", async ({ page, web }) => {
+  await open(page, web);
+  web.publish({
+    agentResources: {
+      skills: [
+        { name: "frontend-design", description: "distinctive visual design", path: "C:/Users/x/.pi/agent/skills/frontend-design/SKILL.md", source: "global" },
+        { name: "pi-vue-nobuild", path: "C:/proj/.pi/skills/pi-vue-nobuild/SKILL.md", source: "project" },
+        { name: "council-mode", description: "advisor council", path: "C:/Users/x/.pi/agent/npm/node_modules/pi-subagents/skills/council-mode/SKILL.md", source: "package", sourceName: "npm:pi-subagents" },
+      ],
+      extensions: [
+        { name: "pi-atom-web", path: "C:/Users/x/.pi/agent/extensions/pi-atom-web/index.ts", source: "global" },
+        { name: "demo", path: "C:/proj/.pi/extensions/demo.ts", source: "project" },
+      ],
+      prompts: [
+        { name: "commit", description: "生成提交信息", path: "C:/Users/x/.pi/agent/prompts/commit.md", source: "global" },
+      ],
+      definition: {
+        contextFiles: [
+          { path: "C:/proj/AGENTS.md", size: 2048 },
+          { path: "C:/proj/sub/AGENTS.override.md", size: 128 },
+        ],
+        systemPromptFile: "C:/Users/x/.pi/agent/SYSTEM.md",
+        appendSystemPromptFile: null,
+        settings: [
+          { path: "C:/Users/x/.pi/agent/settings.json", exists: true },
+          { path: "C:/proj/sub/.pi/settings.json", exists: false },
+        ],
+        packages: ["npm:pi-subagents", "npm:context-mode"],
+        projectTrusted: true,
+      },
+    },
+  });
+  await page.locator('[data-view="settings"]').click();
+  const panel = page.locator("#view-panel-settings");
+
+  await page.locator('[data-section="skills"]').click();
+  await expect(page.locator(".resource-list .resource-item")).toHaveCount(3);
+  await expect(panel).toContainText("frontend-design");
+  await expect(panel).toContainText("council-mode");
+  await expect(panel).toContainText("npm:pi-subagents");
+
+  await page.locator('[data-section="extensions"]').click();
+  await expect(page.locator(".resource-list .resource-item")).toHaveCount(2);
+  await expect(panel).toContainText("pi-atom-web");
+  await expect(panel).toContainText("demo");
+
+  await page.locator('[data-section="prompts"]').click();
+  await expect(panel).toContainText("/commit");
+  await expect(panel).toContainText("生成提交信息");
+
+  await page.locator('[data-section="definition"]').click();
+  await expect(panel).toContainText("C:/proj/AGENTS.md");
+  await expect(panel).toContainText("2.0 KB");
+  await expect(panel).toContainText("C:/Users/x/.pi/agent/SYSTEM.md");
+  await expect(panel).toContainText("npm:context-mode");
+  await expect(panel).toContainText("已受信");
 });
 
 test("switching tabs keeps the transcript laid out and its scroll position", async ({
@@ -2558,16 +2885,20 @@ test("prompt queue activity stacks guidance above queued messages and deletes on
   });
   await page.goto(new URL(`/#${token}`, web.server.url).toString());
   const tab = page.locator('[data-activity-tab="prompt-queue"]');
-  await expect(tab).toContainText("队列 1");
+  await expect(tab).toContainText("消息队列 1");
   await tab.click();
   const panel = page.locator(".prompt-queue-panel");
   await expect(panel).toContainText("已有后续任务");
+  await expect(panel.locator(".prompt-queue-head")).toHaveCount(0);
   await expect(panel.locator(".prompt-queue-compose")).toHaveCount(0);
-  await expect(panel.locator(".prompt-queue-group")).toHaveCount(1);
-  await expect(panel.locator(".prompt-queue-group")).toHaveText(
-    /排队后续轮.*Follow-up 会在当前轮结束后执行.*已有后续任务/s,
+  await expect(panel.locator(".prompt-queue-group")).toHaveCount(2);
+  await expect(panel.locator('[data-queue-kind="steering"]')).toContainText(
+    /引导队列.*0.*暂无/s,
   );
-  await expect(panel.locator(".prompt-queue-group-head")).toHaveCSS(
+  await expect(panel.locator('[data-queue-kind="followUp"]')).toContainText(
+    /排队队列.*1.*已有后续任务/s,
+  );
+  await expect(panel.locator(".prompt-queue-group-head").first()).toHaveCSS(
     "white-space",
     "nowrap",
   );
@@ -2583,6 +2914,95 @@ test("prompt queue activity stacks guidance above queued messages and deletes on
     id: "followUp:0:one",
     revision: 1,
   });
+});
+
+test("an image-only prompt is valid and appears directly in the busy follow-up queue", async ({
+  page,
+  web,
+}) => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  web.setSnapshot({
+    busy: true,
+    pending: false,
+    promptQueue: { revision: 0, count: 0, steering: [], followUp: [] },
+  });
+  web.setActionHandler(async (action, server) => {
+    if (action.type !== "send") return {};
+    const queue = {
+      revision: 1,
+      count: 1,
+      steering: [],
+      followUp: [{
+        id: "followUp:0:image-only",
+        kind: "followUp",
+        index: 0,
+        text: action.text,
+        images: action.images.map((image) => ({ type: "image", ...image })),
+      }],
+    };
+    server.publish({ pending: true, promptQueue: queue });
+    return { delivery: "queued" };
+  });
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  await page.locator(".image-input").setInputFiles({
+    name: "only.png",
+    mimeType: "image/png",
+    buffer: png,
+  });
+  await expect(page.locator("#prompt")).toHaveValue("");
+  await expect(page.locator("#send")).toBeEnabled();
+  await page.locator("#send").click();
+
+  await expect.poll(() => web.actions.length).toBe(1);
+  expect(web.actions[0]).toMatchObject({ type: "send", text: "", mode: "followUp" });
+  expect(web.actions[0].images).toHaveLength(1);
+  await expect(page.locator("#message-live .message.user")).toHaveCount(0);
+  await page.locator('[data-activity-tab="prompt-queue"]').click();
+  await expect(
+    page.locator('.prompt-queue-panel [data-queue-kind="followUp"] .image-preview-trigger'),
+  ).toHaveCount(1);
+});
+
+test("new or changed queue items reopen the panel and flash the destination queue", async ({
+  page,
+  web,
+}) => {
+  const queue = {
+    revision: 1,
+    count: 1,
+    steering: [],
+    followUp: [
+      { id: "followUp:0:first", kind: "followUp", index: 0, text: "第一条" },
+    ],
+  };
+  web.setSnapshot({ busy: true, pending: true, promptQueue: queue });
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  await page.locator('[data-activity-tab="prompt-queue"]').click();
+  await page.getByRole("button", { name: "最小化" }).click();
+  await expect(page.locator(".activity-panel:visible")).toHaveCount(0);
+
+  queue.revision += 1;
+  queue.count += 1;
+  queue.followUp.push({
+    id: "followUp:1:second",
+    kind: "followUp",
+    index: 1,
+    text: "新加入排队",
+  });
+  web.publish({ promptQueue: structuredClone(queue) });
+
+  await expect(page.locator(".activity-panel:visible")).toHaveCount(1);
+  await expect(
+    page.locator(
+      '.activity-panel:visible [data-queue-kind="followUp"] .prompt-queue-item.is-flashing',
+    ),
+  ).toHaveClass(/is-flashing/);
+  await expect(
+    page.locator('.activity-panel:visible .prompt-queue-group.is-flashing'),
+  ).toHaveCount(0);
 });
 
 test("prompt queue activity stays hidden while the model is busy with an empty queue", async ({
@@ -2632,6 +3052,10 @@ test("prompt queue activity edits queued text and moves it into steering", async
   await panel.getByRole("button", { name: "保存为引导" }).click();
 
   await expect(panel.getByText("修改后的引导内容", { exact: true })).toBeVisible();
+  await expect(
+    panel.locator('[data-queue-kind="steering"] .prompt-queue-item'),
+  ).toHaveClass(/is-flashing/);
+  await expect(panel.locator(".prompt-queue-group.is-flashing")).toHaveCount(0);
   const action = web.actions.find((item) => item.type === "queue_update_item");
   expect(action).toMatchObject({
     id: "followUp:0:draft",
@@ -2639,6 +3063,50 @@ test("prompt queue activity edits queued text and moves it into steering", async
     kind: "steer",
     text: "修改后的引导内容",
   });
+});
+
+test("prompt queue shows, previews and edits image-only items", async ({ page, web }) => {
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  const queue = {
+    revision: 1,
+    count: 1,
+    steering: [],
+    followUp: [{
+      id: "followUp:0:image",
+      kind: "followUp",
+      index: 0,
+      text: "",
+      images: [{ type: "image", mimeType: "image/png", data: png }],
+    }],
+  };
+  web.setSnapshot({ busy: true, pending: true, promptQueue: queue });
+  web.setActionHandler(async (action, server) => {
+    if (action.type !== "queue_update_item") return {};
+    queue.followUp[0] = { ...queue.followUp[0], text: action.text, images: action.images };
+    queue.revision += 1;
+    server.publish({ promptQueue: structuredClone(queue) });
+    return { queue };
+  });
+  await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  await page.locator('[data-activity-tab="prompt-queue"]').click();
+  const panel = page.locator(".prompt-queue-panel");
+  await expect(panel.locator(".prompt-queue-images .image-preview-trigger")).toHaveCount(1);
+  await panel.locator(".prompt-queue-images .image-preview-trigger").click();
+  await expect(page.locator(".image-preview-overlay")).toBeVisible();
+  await page.getByRole("button", { name: "关闭图片预览" }).click();
+
+  await panel.getByRole("button", { name: "编辑排队消息：" }).click();
+  await expect(panel.locator(".prompt-queue-editor .image-attachment")).toHaveCount(1);
+  await panel.locator('.prompt-queue-editor input[type="file"]').setInputFiles({
+    name: "second.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(png, "base64"),
+  });
+  await expect(panel.locator(".prompt-queue-editor .image-attachment")).toHaveCount(2);
+  await panel.getByRole("button", { name: "保存为排队" }).click();
+  const action = web.actions.find((item) => item.type === "queue_update_item");
+  expect(action.text).toBe("");
+  expect(action.images).toHaveLength(2);
 });
 
 test("collapsing an activity panel keeps the in-progress form state", async ({
@@ -2708,4 +3176,227 @@ test("the session title is renamed through the command path", async ({
   await expect(page.locator("#rename-session-input")).toHaveCount(0);
   await expect(page.locator("#view-title")).toHaveText("浏览器回归会话");
   expect(sent()).toHaveLength(1);
+});
+
+test("compaction shows one running status on the command rule and the completion line under the summary block", async ({
+  page,
+  web,
+}) => {
+  const startedAt = Date.now() - 13000;
+  const endedAt = startedAt + 34000;
+  const history = fixture().messages[0];
+  web.setSnapshot({
+    compacting: true,
+    messages: [
+      history,
+      {
+        id: "cmd-compact",
+        role: "command",
+        content: "/compact",
+        compaction: { startedAt },
+      },
+    ],
+  });
+  const errors = await open(page, web);
+  const commandArticle = page.locator(
+    '#message-history article.message:has([data-command-rule])',
+  );
+  // 运行态只出现在命令横线下方：带计时，且底部 live 区不再重复显示压缩状态。
+  await expect(commandArticle.locator(".processing-status")).toContainText(
+    /正在压缩上下文\.\.\..*（\d+秒）/,
+  );
+  await expect(page.locator("#message-live .processing-status")).toHaveCount(0);
+
+  // 压缩结束：完成行改由压缩块侧下发，渲染在折叠块**下方**（命令横线处不再重复）。
+  web.publish({
+    compacting: false,
+    messages: [
+      history,
+      { id: "cmd-compact", role: "command", content: "/compact" },
+      {
+        id: "cp-1",
+        role: "compactionSummary",
+        summary: "压缩后的信息",
+        tokensBefore: 267720,
+        compaction: { startedAt, endedAt },
+      },
+    ],
+  });
+  const block = page.locator("#message-history .compaction-message");
+  await expect(block.locator(".compaction-block")).toContainText(
+    "从267,720个token中压缩",
+  );
+  await expect(block.locator(".compaction-done")).toHaveText(
+    "压缩完成（耗时34秒）",
+  );
+  expect(
+    await page.evaluate(() => {
+      const details = document.querySelector(
+        ".compaction-message .compaction-block",
+      );
+      const done = document.querySelector(".compaction-message .compaction-done");
+      const gap =
+        done.getBoundingClientRect().top - details.getBoundingClientRect().bottom;
+      return { below: gap >= 0, gap: Math.round(gap) };
+    }),
+  ).toEqual({ below: true, gap: 8 });
+  await expect(commandArticle.locator(".processing-status")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("folding block titles stick to the scroll top, nested ones cover the outer title", async ({
+  page,
+  web,
+}) => {
+  const long = (n, label) =>
+    Array.from({ length: n }, (_, i) => `${label} 第 ${i + 1} 行`).join("\n");
+  // Markdown 里单个换行只是软换行（同一段），要撑高折叠块得用空行分段。
+  const paragraphs = (n, label) =>
+    Array.from({ length: n }, (_, i) => `${label} 第 ${i + 1} 段`).join("\n\n");
+  web.setSnapshot({
+    messages: [
+      fixture().messages[0],
+      { id: "u1", role: "user", content: "问题", timestamp: Date.now() },
+      {
+        id: "a1",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: long(40, "思考") },
+          {
+            type: "toolCall",
+            id: "call-s",
+            name: "bash",
+            arguments: {
+              command: Array.from(
+                { length: 40 },
+                (_, i) => `echo 命令第 ${i + 1} 行`,
+              ).join("\n"),
+            },
+          },
+        ],
+      },
+      {
+        id: "r1",
+        role: "toolResult",
+        toolCallId: "call-s",
+        content: [{ type: "text", text: paragraphs(40, "输出") }],
+        isError: false,
+      },
+      { id: "a2", role: "assistant", content: "最终答案" },
+      {
+        id: "cp1",
+        role: "compactionSummary",
+        summary: paragraphs(80, "压缩摘要"),
+        tokensBefore: 150722,
+      },
+      ...Array.from({ length: 4 }, (_, i) => ({
+        id: `tail-${i}`,
+        role: "assistant",
+        content: paragraphs(12, `尾部消息 ${i}`),
+      })),
+    ],
+  });
+  const errors = await open(page, web);
+  await page.locator(".compaction-block>summary").click();
+  const styles = await page.evaluate(() => {
+    const at = (q) => {
+      const style = getComputedStyle(document.querySelector(q));
+      return { position: style.position, background: style.backgroundColor };
+    };
+    return {
+      block: at(".compaction-block>summary"),
+      group: at(".turn-group>summary"),
+      nested: at(".turn-group .tool-block>summary"),
+    };
+  });
+  // 每一层折叠块的标题都吸顶并有不透明底色（不透明才遮得住下层内容与外层标题）。
+  for (const style of [styles.block, styles.group, styles.nested]) {
+    expect(style.position).toBe("sticky");
+    expect(style.background).toBe("rgb(255, 255, 255)");
+  }
+  // 分组内部的折叠块同样吸顶：展开内层工具卡并滚进它的正文里，
+  // 内层标题贴住滚动容器顶部，并按绘制顺序盖住外层分组标题（同一位置只有一层标题）。
+  await page.locator(".turn-group>summary").click();
+  await page.locator(".turn-group .tool-block>summary").click();
+  const nestedInside = await page.evaluate(() => {
+    const scroll = document.querySelector("#scroll");
+    scroll.style.scrollBehavior = "auto";
+    const card = document.querySelector(".turn-group .tool-block");
+    const rect = card.getBoundingClientRect();
+    scroll.scrollTo({
+      top:
+        scroll.scrollTop +
+        rect.top -
+        scroll.getBoundingClientRect().top +
+        Math.round(rect.height / 2),
+    });
+    const scrollTop = scroll.getBoundingClientRect().top;
+    const inner = document.querySelector(".turn-group .tool-block>summary");
+    const innerRect = inner.getBoundingClientRect();
+    const hit = document.elementFromPoint(innerRect.left + 60, scrollTop + 4);
+    return {
+      innerRel: Math.round(innerRect.top - scrollTop),
+      groupRel: Math.round(
+        document.querySelector(".turn-group>summary").getBoundingClientRect().top - scrollTop,
+      ),
+      innermostOnTop: Boolean(hit && inner.contains(hit)),
+    };
+  });
+  expect(nestedInside.innerRel).toBe(0);
+  expect(nestedInside.groupRel).toBe(0);
+  expect(nestedInside.innermostOnTop).toBe(true);
+  // 正文里的吸顶层也要在标题之下：代码块行号 gutter 是 `sticky; z-index:1`，
+  // 与标题平级时它会（DOM 更靠后）盖住标题 —— 标题必须是它上面那一层。
+  const overCodeGutter = await page.evaluate(() => {
+    const scroll = document.querySelector("#scroll");
+    scroll.style.scrollBehavior = "auto";
+    const code = document
+      .querySelector(".turn-group .tool-block")
+      .querySelector(".code-block");
+    const rect = code.getBoundingClientRect();
+    scroll.scrollTo({
+      top:
+        scroll.scrollTop +
+        rect.top -
+        scroll.getBoundingClientRect().top +
+        Math.round(rect.height / 2),
+    });
+    const scrollTop = scroll.getBoundingClientRect().top;
+    const gutter = code.querySelector(".code-lines").getBoundingClientRect();
+    const hit = document.elementFromPoint(gutter.left + 8, scrollTop + 4);
+    return { topmost: hit ? `${hit.tagName}.${hit.className}` : null };
+  });
+  expect(overCodeGutter.topmost).toContain("SUMMARY");
+  // 滚进压缩块内部（20% / 60% 位置）：标题一直贴住滚动容器顶部。
+  const inside = async (fraction) =>
+    page.evaluate((fraction) => {
+      const scroll = document.querySelector("#scroll");
+      const block = document.querySelector(".compaction-block");
+      scroll.style.scrollBehavior = "auto";
+      const blockRect = block.getBoundingClientRect();
+      const top =
+        scroll.scrollTop + blockRect.top - scroll.getBoundingClientRect().top;
+      scroll.scrollTo({
+        top: Math.min(
+          top + Math.round(blockRect.height * fraction),
+          scroll.scrollHeight,
+        ),
+      });
+      const rect = block.getBoundingClientRect();
+      const scrollTop = scroll.getBoundingClientRect().top;
+      return {
+        coversTop: rect.top <= scrollTop && rect.bottom > scrollTop,
+        rel: Math.round(
+          document
+            .querySelector(".compaction-block>summary")
+            .getBoundingClientRect().top - scrollTop,
+        ),
+      };
+    }, fraction);
+  for (const fraction of [0.2, 0.6]) {
+    const state = await inside(fraction);
+    expect(state.coversTop, `压缩块应仍覆盖滚动容器顶部（${fraction}）`).toBe(true);
+    expect(state.rel).toBe(0);
+  }
+  expect(errors).toEqual([]);
 });

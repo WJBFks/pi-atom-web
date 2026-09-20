@@ -64,6 +64,11 @@ export const useDialogsStore = defineStore("dialogs", {
   getters: {
     /** 当前阻塞会话的活动组件。 */
     blocking: (state) => blockingActivities(state.requests),
+    /** 阻塞活动的显示名（与活动栏 tab 一致），按 blockedParts 同样的顺序。 */
+    blockingNames: (state) =>
+      blockingActivities(state.requests).map((request) =>
+        activityName(request, state.nameLook || undefined),
+      ),
     /** 阻塞提示分段（无阻塞时为空数组）；渲染用，活动名会包成行内代码。 */
     blockedParts: (state) =>
       blockedMessageParts(state.requests, state.nameLook || undefined),

@@ -25,6 +25,10 @@ export const SETTINGS_SECTIONS = [
   { id: "session", label: "会话信息", title: "会话信息" },
   { id: "connection", label: "连接与实例", title: "连接与实例" },
   { id: "behaviour", label: "行为", title: "默认视图与折叠行为" },
+  { id: "skills", label: "技能", title: "技能" },
+  { id: "extensions", label: "扩展", title: "扩展" },
+  { id: "prompts", label: "模板", title: "Prompt 模板" },
+  { id: "definition", label: "定义", title: "Agent 定义" },
 ];
 
 // 垂直分类导航的键盘移动（↑/↓ 循环、Home/End），目标与当前相同时返回 null。
@@ -164,6 +168,112 @@ export default defineComponent({
           ]),
         ),
       );
+    // 资源来源标签：global/project 固定文案，package 显示包名。
+    const SOURCE_LABELS = { global: "全局", project: "项目" };
+    const sourceLabel = (item) =>
+      item.source === "package"
+        ? item.sourceName || "包"
+        : SOURCE_LABELS[item.source] || item.source;
+    const formatSize = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
+    // 技能/扩展/模板共用的资源列表（空状态用提示行占位）。
+    const resourceList = (items, { emptyText, prefix = "" }) => {
+      const list = Array.isArray(items) ? items : [];
+      if (!list.length) return h("p", { class: "page-hint" }, emptyText);
+      return h(
+        "ul",
+        { class: "resource-list" },
+        list.map((item) =>
+          h(
+            "li",
+            {
+              class: "resource-item",
+              key: `${item.source}|${item.path}|${item.name}`,
+            },
+            [
+              h("div", { class: "resource-line" }, [
+                h("strong", { class: "resource-name" }, `${prefix}${item.name}`),
+                h("span", { class: "resource-chip" }, sourceLabel(item)),
+              ]),
+              item.description
+                ? h("p", { class: "resource-desc" }, item.description)
+                : null,
+              item.path ? h("code", { class: "resource-path" }, item.path) : null,
+            ],
+          ),
+        ),
+      );
+    };
+    // 「定义」分类：上下文文件、系统提示、设置文件、packages、项目信任。
+    const definitionSection = (def) => {
+      if (!def)
+        return [
+          h(
+            "p",
+            { class: "page-hint" },
+            "当前后端版本未提供定义信息，请在 TUI 执行 /reload 后重新打开设置。",
+          ),
+        ];
+      return [
+        field(
+          "上下文文件",
+          def.contextFiles.length
+            ? rows(
+                def.contextFiles.map((f) => ({
+                  label: f.path,
+                  value: formatSize(f.size),
+                })),
+              )
+            : h("p", { class: "page-hint" }, "未加载任何上下文文件"),
+          "按全局 → 顶层父目录 → 当前目录顺序加载；同目录 AGENTS.override.md 优先于 AGENTS.md / CLAUDE.md。",
+        ),
+        field(
+          "系统提示",
+          rows([
+            {
+              label: "替换默认（SYSTEM.md）",
+              value: def.systemPromptFile || "未自定义",
+            },
+            {
+              label: "追加到默认（APPEND_SYSTEM.md）",
+              value: def.appendSystemPromptFile || "无",
+            },
+          ]),
+          null,
+        ),
+        field(
+          "设置文件",
+          rows(
+            def.settings.map((s) => ({
+              label: s.path,
+              value: s.exists ? "存在" : "不存在",
+            })),
+          ),
+          null,
+        ),
+        field(
+          "Packages",
+          def.packages.length
+            ? h(
+                "div",
+                { class: "chip-row" },
+                def.packages.map((p) =>
+                  h("span", { class: "resource-chip", key: p }, p),
+                ),
+              )
+            : h("p", { class: "page-hint" }, "无"),
+          "settings.json 的 packages 声明；包可携带扩展、技能、模板与主题。",
+        ),
+        field(
+          "项目信任",
+          h(
+            "span",
+            { class: def.projectTrusted ? "trust-ok" : "trust-off" },
+            def.projectTrusted ? "已受信" : "未受信",
+          ),
+          "未受信时不加载项目级扩展与项目 settings.json 声明的资源。",
+        ),
+      ];
+    };
     const body = () => {
       if (section.value === "appearance")
         return [
@@ -273,6 +383,42 @@ export default defineComponent({
             "扩展执行 /reload 后页面会自动刷新；此处用于手动重新拉取快照。",
           ),
         ];
+      if (section.value === "skills")
+        return [
+          resourceList(session.agentResources?.skills, {
+            emptyText: "未加载任何技能。",
+          }),
+          h(
+            "p",
+            { class: "page-hint" },
+            "技能来自 pi 全局目录、项目 .pi/skills 与 npm 包；可用 /skill:名称 显式调用。",
+          ),
+        ];
+      if (section.value === "extensions")
+        return [
+          resourceList(session.agentResources?.extensions, {
+            emptyText: "未加载任何扩展。",
+          }),
+          h(
+            "p",
+            { class: "page-hint" },
+            "按 pi 的目录发现规则扫描：全局 ~/.pi/agent/extensions、项目 .pi/extensions、settings.json 声明与 npm 包；未受信项目的项目级扩展不加载。",
+          ),
+        ];
+      if (section.value === "prompts")
+        return [
+          resourceList(session.agentResources?.prompts, {
+            emptyText: "未加载任何 Prompt 模板。",
+            prefix: "/",
+          }),
+          h(
+            "p",
+            { class: "page-hint" },
+            "Prompt 模板以斜杠命令调用，如 /模板名。",
+          ),
+        ];
+      if (section.value === "definition")
+        return definitionSection(session.agentResources?.definition);
       return [
         field(
           "打开页面时显示",

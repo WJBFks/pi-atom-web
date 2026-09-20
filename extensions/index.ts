@@ -6,6 +6,8 @@ import { basename } from "node:path";
 import { createPackageCompatibilityRegistry } from "./packages/registry.ts";
 import { bridgeDialogs } from "./dialogs.ts";
 import { startServer } from "./server.ts";
+import { buildAgentResources } from "./agent-resources.ts";
+import { createThinkingTracker } from "./thinking-timings.ts";
 import { normalizeRunningTool } from "./tool-events.ts";
 import { statusNoteFor } from "./status-note.ts";
 import {
@@ -18,9 +20,11 @@ import {
   installPromptQueueRuntime,
   promptQueueSnapshot,
 } from "./prompt-queue.ts";
+import { installSessionTreeRuntime } from "./session-tree.ts";
 
 const RELOAD_HANDOFF = Symbol.for("pi-atom-web.reload-handoff");
 const promptQueues = installPromptQueueRuntime(AgentSession);
+const sessionTree = installSessionTreeRuntime(AgentSession);
 import {
   HISTORY_PAGE_TURNS,
   HISTORY_TURNS,
@@ -88,10 +92,147 @@ export default function atomWeb(pi) {
     completedLiveIds = new Map();
   const pendingUserRecords = [];
   let responseWaitStartedAt = null;
+  // 同一 session 文件内切换树分支时递增。普通历史窗口滑动仍由浏览器做并集；
+  // revision 改变的那次 messages patch 则代表另一条活跃分支，必须替换旧分支历史。
+  let historyRevision = 0;
+  // 本轮任务真正开始的时刻（prompt 被宿主接管那一刻），**跨越整轮**：
+  // 期间的工具调用、多轮往返、甚至被活动组件阻塞都算在同一轮里，
+  // 只在整轮结束（agent_settled）时清空。前端用它算「处理时间 = 现在 − 它」。
+  let processingStartedAt = null;
+  // 上下文压缩正在进行中（auto / manual）。压缩期间前端显示「正在压缩上下文...」。
+  let compacting = false;
+  // 本次压缩的起点与它所属的命令记录 id（`/compact` 命令记录）。
+  // **运行态不落盘**：只在序列化输出里挂到那条记录上，完成后才把
+  // `{ startedAt, endedAt }` 写进记录（渲染成「压缩完成（耗时…）」），
+  // 因此进程中途退出不会残留一个转不完的「正在压缩...」。
+  let compactionStartedAt = null;
+  let compactionRecordId = null;
+  // 「编辑用户提示词后重开该轮」进行中：前端据此在状态行显示「正在重启该轮…」。
+  let restarting = false;
+  // 每轮的已结算时长：key = 该轮最终输出那条消息的客户端 id
+  // （`<sessionId>:branch:<entryId>`，与 history 消息 id 同格式），
+  // value = { startedAt, durationMs }。前端据此把「已完成（时长）」贴在**每一轮**的
+  // 输出下方（而不是只留一个复用的状态窗），并且落盘，刷新后仍能显示。
+  const turnProcessing = new Map();
+
+  /**
+   * 本轮最终输出对应的 key：branch 里最后一条 assistant entry 的客户端消息 id。
+   * 与前端 history 里该消息的 id 完全一致，所以前端能直接按渲染出的消息 id 查到时长。
+   */
+  function turnProcessingKey(branch) {
+    for (let index = branch.length - 1; index >= 0; index -= 1) {
+      const entry = branch[index];
+      if (entry?.type === "message" && entry.message?.role === "assistant")
+        return `${context.sessionManager.getSessionId()}:branch:${entry.id}`;
+    }
+    return null;
+  }
+
+  // 工具调用没有对应的 toolResult：那一轮是在工具跑到一半时被断掉的
+  // （强杀 PI / 进程退出，toolResult 永远没写进会话文件）。
+  // 由 branch 状态推导而非事件：刷新、重开会话后照样成立。
+  // 只在会话空闲时判定 —— 工具「正在跑」时 branch 尾部同样是「有调用无结果」，
+  // 那不是中断，不能误报。
+  function interruptedTurns(branch) {
+    const answered = new Set();
+    for (const entry of branch)
+      if (entry?.type === "message" && entry.message?.role === "toolResult")
+        answered.add(String(entry.message.toolCallId ?? ""));
+    const out = new Map();
+    for (const entry of branch) {
+      if (entry?.type !== "message" || entry.message?.role !== "assistant") continue;
+      const blocks = Array.isArray(entry.message.content)
+        ? entry.message.content
+        : [];
+      const dangling = blocks.filter(
+        (b) =>
+          b?.type === "toolCall" &&
+          !answered.has(String(b.id ?? b.toolCallId ?? "")),
+      );
+      if (dangling.length)
+        out.set(
+          entry.id,
+          dangling.map((b) => b.name ?? b.toolName).filter(Boolean),
+        );
+    }
+    return out;
+  }
+
+  // error / aborted 且正文为空的助手消息：原因已由「已中断」提示行完整承载
+  // （recordInterruption 读同一条 errorMessage），从历史里滤掉，
+  // 避免同一段报错出现两次（红色消息卡 + 提示行）。
+  // 带部分正文的保留 —— 那是真实输出，不是报错本身。
+  function isSilentErrorAssistant(message) {
+    if (message?.role !== "assistant") return false;
+    if (message.stopReason !== "error" && message.stopReason !== "aborted")
+      return false;
+    const blocks = Array.isArray(message.content) ? message.content : [];
+    return blocks.every((b) => {
+      if (b?.type === "toolCall") return false;
+      return !String(b?.text ?? b?.thinking ?? "").trim();
+    });
+  }
+
+  // 刚结束的这轮是否被中断：最后一条是 error/aborted 助手、
+  // 出错的工具结果（工具中途 Esc），或停在「有调用无结果」的助手消息上。
+  function turnWasInterrupted(branch) {
+    const last = branch.at(-1);
+    if (last?.type !== "message") return false;
+    const m = last.message;
+    if (m?.role === "toolResult") return m.isError === true;
+    if (m?.role !== "assistant") return false;
+    if (m.stopReason === "aborted" || m.stopReason === "error") return true;
+    const blocks = Array.isArray(m.content) ? m.content : [];
+    const interrupted = interruptedTurns(branch);
+    return (
+      interrupted.has(last.id) ||
+      blocks.some((b) => b?.type === "toolCall" && interrupted.has(last.id))
+    );
+  }
   let responseWaitOwnerId = null;
   const runningTools = new Map();
   const completedToolTimings = new Map();
   const completedThinkingTimings = new Map();
+  // 思考块计时：后端权威。只要扩展加载着就从事件流计时并落盘，
+  // 不依赖 Web 是否启动（旧逻辑靠浏览器计时再经 save_ui_state 回传，
+  // Web 未启动时整条链路不存在，时长就丢了）。
+  const thinkingTracker = createThinkingTracker();
+  // 已结算但分支 entry 还没确认：liveId -> { sessionId, settled: {index: timing} }。
+  // message_end 时 Pi 还没把消息写进 branch，要等 displayMessages 认领 entry
+  // 才能把 key 从 live id 换成历史消息 id（`<sessionId>:branch:<entryId>`）。
+  const pendingThinkingSettles = new Map();
+  function commitThinkingTimings(historyId, settled) {
+    let changed = false;
+    for (const [index, timing] of Object.entries(settled)) {
+      const key = `${historyId}-thinking-${index}`;
+      if (completedThinkingTimings.has(key)) continue;
+      completedThinkingTimings.set(key, timing);
+      changed = true;
+      if (completedThinkingTimings.size > 500)
+        completedThinkingTimings.delete(completedThinkingTimings.keys().next().value);
+    }
+    if (changed) persistState();
+    return changed;
+  }
+  function migrateThinkingTimings(liveId, historyId) {
+    const pending = pendingThinkingSettles.get(liveId);
+    if (!pending) return;
+    pendingThinkingSettles.delete(liveId);
+    if (commitThinkingTimings(historyId, pending.settled))
+      publish(context, { thinkingTimings: Object.fromEntries(completedThinkingTimings) });
+  }
+  // message_end 没触发（强杀 / 异常）时的兑底：整轮结束时把残留的思考块
+  // 直接结算到 branch 末尾的 assistant entry。
+  function fallbackThinkingTimings(ctx) {
+    const leftover = thinkingTracker.finish();
+    pendingThinkingSettles.clear();
+    if (!Object.keys(leftover).length) return;
+    const entry = ctx.sessionManager.getBranch().at(-1);
+    if (entry?.type !== "message" || entry.message?.role !== "assistant") return;
+    const historyId = `${ctx.sessionManager.getSessionId()}:branch:${entry.id}`;
+    if (commitThinkingTimings(historyId, leftover))
+      publish(ctx, { thinkingTimings: Object.fromEntries(completedThinkingTimings) });
+  }
   const disclosures = new Map();
   let stateStore;
   const packageCompatibilities = createPackageCompatibilityRegistry(pi);
@@ -103,6 +244,7 @@ export default function atomWeb(pi) {
       thinkingTimings: Object.fromEntries(completedThinkingTimings),
       disclosures: Object.fromEntries(disclosures),
       displayRecords,
+      turnProcessing: Object.fromEntries(turnProcessing),
     });
   }
   async function activateState(ctx, preserveDisplayRecords = false) {
@@ -117,8 +259,13 @@ export default function atomWeb(pi) {
     for (const entry of Object.entries(saved.toolTimings)) completedToolTimings.set(...entry);
     completedThinkingTimings.clear();
     for (const entry of Object.entries(saved.thinkingTimings)) completedThinkingTimings.set(...entry);
+    thinkingTracker.reset();
+    pendingThinkingSettles.clear();
     disclosures.clear();
     for (const entry of Object.entries(saved.disclosures)) disclosures.set(...entry);
+    turnProcessing.clear();
+    for (const entry of Object.entries(saved.turnProcessing || {}))
+      turnProcessing.set(...entry);
     displayRecords.length = 0;
     displayRecords.push(...saved.displayRecords, ...capturedDisplayRecords);
     if (capturedDisplayRecords.length) persistState();
@@ -146,8 +293,23 @@ export default function atomWeb(pi) {
     }
   }
   async function submitPrompt(content, options) {
-    if (promptQueues.has(context.sessionManager))
-      return promptQueues.submit(context.sessionManager, content, options);
+    if (promptQueues.has(context.sessionManager)) {
+      const result = await promptQueues.submit(
+        context.sessionManager,
+        content,
+        options,
+      );
+      // Pi emits queue_update before it appends the full user message (including
+      // images) to Agent.steeringQueue/followUpQueue. Publish once more at the
+      // accepted preflight boundary so the browser cannot get stuck on the
+      // earlier text-only mirror.
+      const promptQueue = currentPromptQueue();
+      publish(context, {
+        promptQueue,
+        pending: promptQueue.count > 0,
+      });
+      return result;
+    }
     // 旧 Pi 或测试宿主没有 AgentSession 观察入口时保留正式扩展 API 回退。
     pi.sendUserMessage(content, {
       deliverAs: options.mode,
@@ -161,7 +323,7 @@ export default function atomWeb(pi) {
   });
   function recordDisplay(role, text, level, detail) {
     const branch = context.sessionManager.getBranch();
-    displayRecords.push({
+    const record = {
       id: `${context.sessionManager.getSessionId()}:display:${randomUUID()}`,
       sessionId: context.sessionManager.getSessionId(),
       anchor: branch.at(-1)?.id ?? null,
@@ -171,10 +333,13 @@ export default function atomWeb(pi) {
         level,
         ...(detail ? { detail: String(detail).slice(0, 4096) } : {}),
       },
-    });
+    };
+    displayRecords.push(record);
     if (displayRecords.length > 500) displayRecords.shift();
     persistState();
     publish(context, {}, { history: true });
+    // 调用方（如 /compact）可能需要在这条记录上补执行状态。
+    return record;
   }
   // 已记录过中止提示的 branch 末尾 entry id —— 同一轮不要重复插红条。
   let interruptedEntryId = null;
@@ -335,6 +500,68 @@ export default function atomWeb(pi) {
     );
     const namespace = context.sessionManager.getSessionId();
     const branch = context.sessionManager.getBranch();
+    // 用户消息的兄弟分支（同一父节点下的多个 user 子节点 = 平行会话）：
+    // 一次遍历建表，避免在消息循环里反复扫全量 entry。旧宿主/测试假会话
+    // 没有 getEntries() 时回退到当前分支，即视为无平行分支（不发 branch 字段）。
+    const allEntries =
+      typeof context.sessionManager.getEntries === "function"
+        ? context.sessionManager.getEntries() || []
+        : branch;
+    const entriesById = new Map(allEntries.map((entry) => [entry.id, entry]));
+    // 编辑重启回到原用户消息之前后，第三方扩展可能在新 Prompt 写入前通过
+    // appendEntry() 插入 custom 状态条目。此时新旧用户消息的直接 parentId 不同，
+    // 但仍从同一个对话位置分叉。分支归组因此跳过这些不构成对话轮次的元数据
+    // entry，停在最近的真实 message 或结构边界上。
+    const transparentParentTypes = new Set([
+      "custom",
+      "model_change",
+      "thinking_level_change",
+      "session_info",
+      "label",
+    ]);
+    const userBranchAnchor = (entry) => {
+      let parentId = entry.parentId ?? null;
+      const visited = new Set();
+      while (parentId && !visited.has(parentId)) {
+        visited.add(parentId);
+        const parent = entriesById.get(parentId);
+        if (!parent || !transparentParentTypes.has(parent.type)) return parentId;
+        parentId = parent.parentId ?? null;
+      }
+      return parentId ?? "";
+    };
+    const userSiblings = new Map();
+    for (const entry of allEntries) {
+      if (entry.type !== "message" || entry.message?.role !== "user") continue;
+      const key = userBranchAnchor(entry);
+      const list = userSiblings.get(key);
+      if (list) list.push(entry.id);
+      else userSiblings.set(key, [entry.id]);
+    }
+    const entryTimestamp = (entry) => {
+      const raw = entry?.timestamp ?? entry?.message?.timestamp;
+      const value = typeof raw === "number" ? raw : Date.parse(raw);
+      return Number.isFinite(value) ? value : undefined;
+    };
+    // 用户提示词状态行所需的附加字段：时间戳（本地展示 HH:MM + hover 完整时间戳）
+    // 与兄弟分支信息（count > 1 才发，前端据此显示 `< x/y >`）。
+    const messageExtras = (entry) => {
+      const extras = {};
+      const timestamp = entryTimestamp(entry);
+      if (timestamp != null) extras.timestamp = timestamp;
+      if (entry.message?.role === "user") {
+        const ids = userSiblings.get(userBranchAnchor(entry)) || [];
+        const index = ids.indexOf(entry.id);
+        if (ids.length > 1 && index >= 0)
+          extras.branch = {
+            index: index + 1,
+            count: ids.length,
+            prev: index > 0 ? ids[index - 1] : null,
+            next: index < ids.length - 1 ? ids[index + 1] : null,
+          };
+      }
+      return extras;
+    };
     const claimedUserEntries = new Set();
     const reconciledRecordIds = new Set();
     for (const record of pendingUserRecords) {
@@ -370,6 +597,8 @@ export default function atomWeb(pi) {
     );
     for (const id of completedLiveIds.keys())
       if (!branchIds.has(id)) completedLiveIds.delete(id);
+    for (const [liveId, pending] of pendingThinkingSettles)
+      if (pending.sessionId !== namespace) pendingThinkingSettles.delete(liveId);
     for (const [liveId, link] of pendingLiveLinks) {
       if (link.sessionId !== namespace) {
         pendingLiveLinks.delete(liveId);
@@ -398,20 +627,88 @@ export default function atomWeb(pi) {
       if (entry) {
         completedLiveIds.set(`${namespace}:branch:${entry.id}`, liveId);
         pendingLiveLinks.delete(liveId);
+        migrateThinkingTimings(liveId, `${namespace}:branch:${entry.id}`);
       }
     }
-    const withId = (message, id) => ({
+    const withId = (message, id, extras) => ({
       ...message,
       id,
+      ...(extras || {}),
       ...(completedLiveIds.has(id) ? { liveId: completedLiveIds.get(id) } : {}),
     });
+    // 展示记录（命令/通知/状态提示/中止提示）：压缩进行中时把运行态挂到它所属的
+    // 那条命令记录上，前端据此在命令横线下方显示「正在压缩上下文...（x秒）」。
+    // 运行态不进 `displayRecords`（不落盘）。
+    //
+    // **完成态跟着压缩块走**：落盘的 `{ startedAt, endedAt }` 若在本分支存在对应的
+    // 压缩条目（命令行 → 压缩块 → 「压缩完成」一行），就从命令记录上摘掉、改挂到
+    // 那条 `compactionSummary` 上，由前端渲染在折叠块**下方**，避免同一格完成行
+    // 在命令横线处与压缩块下方各出现一次。分支里没有该压缩条目时保留原样，
+    // 不留丢失完成行的死角。
+    const compactionParents = new Set(
+      branch
+        .filter((entry) => entry.type === "compaction")
+        .map((entry) => entry.parentId),
+    );
+    const completedByAnchor = new Map();
+    for (const record of records) {
+      const done = record.message?.compaction;
+      if (done && typeof done.endedAt === "number" && record.anchor !== null)
+        completedByAnchor.set(record.anchor, {
+          startedAt: done.startedAt,
+          endedAt: done.endedAt,
+        });
+    }
+    const recordMessage = (record) => {
+      if (compacting && compactionRecordId === record.id && compactionStartedAt != null)
+        return {
+          ...record.message,
+          compaction: { startedAt: compactionStartedAt },
+        };
+      const done = record.message?.compaction;
+      if (
+        done &&
+        typeof done.endedAt === "number" &&
+        record.anchor !== null &&
+        compactionParents.has(record.anchor)
+      ) {
+        const { compaction: _moved, ...rest } = record.message;
+        return rest;
+      }
+      return record.message;
+    };
     const messages = records
       .filter((r) => r.anchor === null)
-      .map((r) => withId(r.message, r.id));
+      .map((r) => withId(recordMessage(r), r.id));
+    // 工具跑到一半被断掉的轮次（强杀等）：agent_settled 没机会跑，
+    // recordInterruption 记不了「已中断」，这里按 branch 状态推导一条合成的。
+    // 纯派生（不进 displayRecords、不落盘），刷新后重建结果一致。
+    const interrupted =
+      context.isIdle() ? interruptedTurns(branch) : new Map();
     for (const entry of branch) {
-      if (entry.type === "message")
-        messages.push(withId(entry.message, `${namespace}:branch:${entry.id}`));
-      else if (entry.type === "custom")
+      if (entry.type === "message") {
+        if (!isSilentErrorAssistant(entry.message))
+          messages.push(
+            withId(
+              entry.message,
+              `${namespace}:branch:${entry.id}`,
+              messageExtras(entry),
+            ),
+          );
+        if (interrupted.has(entry.id)) {
+          const tools = interrupted.get(entry.id);
+          messages.push({
+            id: `${namespace}:display:dangling:${entry.id}`,
+            sessionId: namespace,
+            role: "interrupted",
+            content: "已中断",
+            detail: tools.length
+              ? `工具调用未完成（${tools.join("、")}），会话中途断开`
+              : "会话中途断开",
+            hint: "点击复制",
+          });
+        }
+      } else if (entry.type === "custom")
         messages.push(
           normalizeCustomEntry(entry, namespace, {
             renderer: entryRenderers.get(entry.customType),
@@ -419,10 +716,28 @@ export default function atomWeb(pi) {
             width: 100,
           }),
         );
+      else if (entry.type === "compaction") {
+        // 压缩条目：渲染成「压缩」可折叠块（摘要行 = 「从N个token中压缩」，
+        // 展开 = Pi 写进 branch 的压缩摘要全文）。与 branch_summary 一样，
+        // 它是 branch 里的结构条目，不是对话消息。
+        // 触发它的那条 `/compact` 命令若已完成，完成行跟着块走（渲染在块下方）。
+        const tokensBefore = Number(entry.tokensBefore);
+        const done = completedByAnchor.get(entry.parentId);
+        messages.push({
+          id: `${namespace}:branch:${entry.id}`,
+          sessionId: namespace,
+          role: "compactionSummary",
+          summary: typeof entry.summary === "string" ? entry.summary : "",
+          ...(Number.isFinite(tokensBefore) && tokensBefore >= 0
+            ? { tokensBefore }
+            : {}),
+          ...(done ? { compaction: done } : {}),
+        });
+      }
       messages.push(
         ...records
           .filter((r) => r.anchor === entry.id)
-          .map((r) => withId(r.message, r.id)),
+          .map((r) => withId(recordMessage(r), r.id)),
       );
     }
     return messages;
@@ -461,10 +776,12 @@ export default function atomWeb(pi) {
     if (startsImmediately) {
       responseWaitOwnerId = record.message.id;
       responseWaitStartedAt = Date.now();
+      processingStartedAt ||= responseWaitStartedAt;
     }
     publish(context, {
       pendingUserMessages: pendingUserMessages(),
       responseWaitStartedAt,
+      processingStartedAt,
     });
     return record;
   }
@@ -592,10 +909,23 @@ export default function atomWeb(pi) {
       pending: context.hasPendingMessages(),
       promptQueue: currentPromptQueue(),
       commands: commands(),
+      // Agent 定义：pi 自动加载的技能/扩展/模板清单与定义文件（设置页只读展示）。
+      // 技能/模板来自 pi.getCommands()（真实加载清单），扩展与定义文件按 pi 的
+      // 目录发现规则从磁盘镜像；项目未受信时不列出项目级资源。
+      agentResources: buildAgentResources({
+        cwd: context.cwd,
+        isProjectTrusted: Boolean(context.isProjectTrusted?.()),
+        getCommands: () => pi.getCommands(),
+      }),
       stats: sessionStats(),
       ...windowedMessages(),
+      historyRevision,
       pendingUserMessages: pendingUserMessages(),
       responseWaitStartedAt,
+      processingStartedAt,
+      compacting,
+      restarting,
+      turnProcessing: Object.fromEntries(turnProcessing),
       requests: dialogs?.list() || [],
       liveMessage,
       tools: [...runningTools.values()],
@@ -675,6 +1005,116 @@ export default function atomWeb(pi) {
         server?.publish(changes, sessionId);
       }, 32);
   }
+  /** entry 的时间（数值毫秒）；缺失时返回 0 便于比较。 */
+  function entryTime(entry) {
+    const raw = entry?.timestamp ?? entry?.message?.timestamp;
+    const value = typeof raw === "number" ? raw : Date.parse(raw);
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  /** 该分支的末端：沿「最新子节点」一路向下，切到某条平行会话时能看到它的完整后续。 */
+  function branchTip(entryId) {
+    let current = entryId;
+    const childrenOf = (id) =>
+      typeof context.sessionManager.getChildren === "function"
+        ? context.sessionManager.getChildren(id) || []
+        : [];
+    for (let guard = 0; guard < 4096; guard += 1) {
+      const children = childrenOf(current);
+      if (!children.length) return current;
+      const next = children.reduce(
+        (best, item) => (entryTime(item) >= entryTime(best) ? item : best),
+        children[0],
+      );
+      current = next.id;
+    }
+    return current;
+  }
+
+  /** 会话树的写操作（切换活跃叶子）会要求非流式；先等当前响应真正停下来。 */
+  async function waitUntilIdle(timeoutMs = 8000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!context.isIdle() && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    if (!context.isIdle()) throw new Error("等待当前响应结束超时");
+  }
+
+  async function abortForTree() {
+    if (context.isIdle()) return;
+    context.abort();
+    await waitUntilIdle();
+  }
+
+  async function navigateTree(targetId) {
+    if (!sessionTree.has(context.sessionManager))
+      throw new Error("当前 Pi 运行时不支持会话分支切换");
+    await sessionTree.navigate(context.sessionManager, targetId);
+  }
+
+  /**
+   * 编辑用户提示词并重发：中断当前生成 → 让 Pi 导航到该用户消息（Pi 会把叶子
+   * 定位到它的父节点）→ 以新文本（带原图片）重开该轮。新用户消息因此成为原消息
+   * 的兄弟分支，原分支保留可切回。
+   */
+  async function editUserMessage(input) {
+    const entry = context.sessionManager.getEntry(input.entryId);
+    if (!entry || entry.type !== "message" || entry.message?.role !== "user")
+      throw new Error("只能编辑用户消息");
+    const images = Array.isArray(entry.message.content)
+      ? entry.message.content.filter((block) => block?.type === "image")
+      : [];
+    const text = typeof input.text === "string" ? input.text.trim() : "";
+    if (!text && !images.length) throw new Error("消息内容不能为空");
+    await abortForTree();
+    restarting = true;
+    publish(context, { restarting });
+    try {
+      // 必须把“被编辑的用户 entry”交给 Pi，而不是自己导航到 parentId。
+      // AgentSession.navigateTree() 对 user entry 有专门语义：自动选择 parentId
+      // （根消息则选择 null）、重建 agent.state.messages，并发出 session_tree。
+      // 直接 resetLeaf() 只改 SessionManager 指针，会让模型继续带着旧分支上下文。
+      await navigateTree(input.entryId);
+      const content = images.length
+        ? [...(text ? [{ type: "text", text }] : []), ...images]
+        : text;
+      const record = trackSubmittedPrompt(content, true, true);
+      try {
+        await submitPrompt(content, {
+          mode: "followUp",
+          onError: (error) =>
+            context.ui.notify(`消息执行失败：${error.message}`, "error"),
+        });
+      } catch (error) {
+        const index = pendingUserRecords.indexOf(record);
+        if (index >= 0) removePendingUserRecord(record);
+        if (responseWaitOwnerId === record.message.id) {
+          responseWaitOwnerId = null;
+          responseWaitStartedAt = null;
+        }
+        publish(context, {
+          pendingUserMessages: pendingUserMessages(),
+          responseWaitStartedAt,
+          processingStartedAt,
+        });
+        throw error;
+      }
+      return { restarted: true };
+    } finally {
+      restarting = false;
+      publish(context, { restarting });
+    }
+  }
+
+  /** 在平行分支间切换：导航到目标兄弟用户消息所在分支的末端。 */
+  async function navigateBranch(input) {
+    const target = context.sessionManager.getEntry(input.entryId);
+    if (!target || target.type !== "message" || target.message?.role !== "user")
+      throw new Error("目标分支无效");
+    await abortForTree();
+    await navigateTree(branchTip(input.entryId));
+    return { navigated: true };
+  }
+
   async function action(input) {
     if (!input || input.sessionId !== context.sessionManager.getSessionId())
       throw new Error("TUI 已切换会话，请等待页面同步后重试");
@@ -688,6 +1128,7 @@ export default function atomWeb(pi) {
         context.sessionManager,
         input.kind,
         input.text,
+        input.images,
       );
       return { promptQueue };
     }
@@ -698,14 +1139,12 @@ export default function atomWeb(pi) {
       return promptQueues.update(context.sessionManager, input);
     }
     if (input.type === "save_ui_state") {
-      completedThinkingTimings.clear();
-      for (const entry of Object.entries(input.thinkingTimings || {}))
-        completedThinkingTimings.set(...entry);
+      // 思考时长改由后端从事件流计算并落盘（见 thinkingTracker），
+      // 浏览器不再回传 thinkingTimings；这里只接收手动折叠状态。
       disclosures.clear();
       for (const entry of Object.entries(input.disclosures || {})) disclosures.set(...entry);
       persistState();
       publish(context, {
-        thinkingTimings: Object.fromEntries(completedThinkingTimings),
         disclosures: Object.fromEntries(disclosures),
       });
       return;
@@ -739,6 +1178,11 @@ export default function atomWeb(pi) {
       publish(context, { responseWaitStartedAt });
       return;
     }
+    // 用户提示词状态行：编辑重发（重开该轮，产生兄弟分支）与分支切换。
+    if (input.type === "edit_user_message")
+      return await editUserMessage(input);
+    if (input.type === "navigate_branch")
+      return await navigateBranch(input);
     if (input.type === "select_model") {
       if (!context.isIdle()) throw new Error("请等待当前响应完成后再切换模型");
       const model = (
@@ -819,11 +1263,23 @@ export default function atomWeb(pi) {
       if (name === "compact") {
         if (!context.isIdle())
           throw new Error("请等待当前响应完成后再压缩上下文");
-        recordDisplay("command", text);
+        const record = recordDisplay("command", text);
+        // 把本次压缩绑到这条命令记录上（记录 id 在 `record.id`，不在 message 上）：
+        // 压缩期间显示「正在压缩上下文...（x秒）」，完成后同一条记录显示
+        // 「压缩完成（耗时x）」（见 session_before_compact / session_compact），
+        // 压缩摘要本身来自 branch 里的 compaction 条目。
+        compactionRecordId = record.id;
+        compactionStartedAt = null;
         context.compact({
           ...(args ? { customInstructions: args } : {}),
-          onError: (error) =>
-            context.ui.notify(`上下文压缩失败：${error.message}`, "error"),
+          onError: (error) => {
+            // 压缩没起来：解除绑定，别让下一次（可能是自动）压缩认领这条旧记录。
+            if (compactionRecordId === record.id) {
+              compactionRecordId = null;
+              compactionStartedAt = null;
+            }
+            context.ui.notify(`上下文压缩失败：${error.message}`, "error");
+          },
         });
         publish(context, {
           busy: !context.isIdle(),
@@ -860,6 +1316,7 @@ export default function atomWeb(pi) {
           publish(context, {
             pendingUserMessages: pendingUserMessages(),
             responseWaitStartedAt,
+            processingStartedAt,
           });
         }
         throw error;
@@ -888,6 +1345,7 @@ export default function atomWeb(pi) {
         publish(context, {
           pendingUserMessages: pendingUserMessages(),
           responseWaitStartedAt,
+          processingStartedAt,
         });
         throw error;
       }
@@ -921,6 +1379,7 @@ export default function atomWeb(pi) {
         disclosures: Object.fromEntries(disclosures),
         pendingUserMessages: [],
         responseWaitStartedAt,
+        processingStartedAt,
       },
       { history: true, stats: true },
     );
@@ -956,9 +1415,13 @@ export default function atomWeb(pi) {
       pendingUserRecords.length = 0;
       responseWaitOwnerId = null;
       responseWaitStartedAt = null;
+      if (name === "session_tree") historyRevision += 1;
       publish(
         ctx,
         {
+          ...(name === "session_tree"
+            ? { messages: displayMessages(), historyRevision }
+            : {}),
           liveMessage,
           tools: [],
           toolTimings: Object.fromEntries(completedToolTimings),
@@ -966,11 +1429,48 @@ export default function atomWeb(pi) {
           disclosures: Object.fromEntries(disclosures),
           pendingUserMessages: [],
           responseWaitStartedAt,
+          processingStartedAt,
         },
-        { history: true, stats: true },
+        { history: name !== "session_tree", stats: true },
       );
     });
   }
+  // 压缩开始 / 结束：前端据此显示「正在压缩上下文...」而不是误判为「正在等待模型响应」。
+  // 注意：这些是扩展面事件（session_*），不是 TUI 内部的 compaction_start/end。
+  pi.on("session_before_compact", (_event, ctx) => {
+    context = ctx;
+    compacting = true;
+    compactionStartedAt = Date.now();
+    // 带上历史刷新：运行态要挂到那条 /compact 命令记录上（见 displayMessages）。
+    publish(ctx, { compacting }, { history: true });
+  });
+  const endCompaction = (succeeded, _event, ctx) => {
+    context = ctx;
+    compacting = false;
+    // 成功时把起止时间写进触发它的命令记录（落盘，刷新后仍显示「压缩完成（耗时…）」）；
+    // 失败时不写 —— 失败提示由 context.compact 的 onError 通知承担。
+    if (succeeded && compactionRecordId && compactionStartedAt != null) {
+      const record = displayRecords.find(
+        (item) => item.id === compactionRecordId,
+      );
+      if (record) {
+        record.message.compaction = {
+          startedAt: compactionStartedAt,
+          endedAt: Date.now(),
+        };
+        persistState();
+      }
+    }
+    compactionRecordId = null;
+    compactionStartedAt = null;
+    // 压缩完成后 branch 里多一条 compaction 摘要条目，刷新历史让前端看到。
+    publish(ctx, { compacting }, { history: true, stats: true });
+  };
+  pi.on("session_compact", (event, ctx) => endCompaction(true, event, ctx));
+  pi.on("session_compact_failed", (event, ctx) =>
+    endCompaction(false, event, ctx),
+  );
+
   for (const name of [
     "agent_start",
     "agent_end",
@@ -989,7 +1489,31 @@ export default function atomWeb(pi) {
       if (name === "agent_end" || name === "agent_settled") {
         // agent_settled 才代表「不会再有自动重试/续跑」，此时判定中止最准；
         // agent_end 可能紧跟一次自动重试，过早记录会误报。
-        if (name === "agent_settled") recordInterruption(ctx.sessionManager.getBranch());
+        if (name === "agent_settled") {
+          recordInterruption(ctx.sessionManager.getBranch());
+          fallbackThinkingTimings(ctx);
+          // 整轮真正结束：结算总时长并清空起点，前端据此显示「已完成（时长）」。
+          // 放在 agent_settled 而不是 agent_end：后者后面可能紧跟自动重试/续跑，
+          // 那仍属于同一轮，提前结算会让时长偏短。
+          if (processingStartedAt != null) {
+            const key = turnProcessingKey(ctx.sessionManager.getBranch());
+            if (key) {
+              turnProcessing.set(key, {
+                startedAt: processingStartedAt,
+                durationMs: Date.now() - processingStartedAt,
+                status: turnWasInterrupted(
+                  ctx.sessionManager.getBranch(),
+                )
+                  ? "interrupted"
+                  : "done",
+              });
+              if (turnProcessing.size > 500)
+                turnProcessing.delete(turnProcessing.keys().next().value);
+              persistState();
+            }
+            processingStartedAt = null;
+          }
+        }
         if (responseWaitOwnerId) {
           const index = pendingUserRecords.findIndex(
             (record) => record.message.id === responseWaitOwnerId,
@@ -1016,6 +1540,9 @@ export default function atomWeb(pi) {
           pending: ctx.hasPendingMessages(),
           modelOptions: modelOptions(),
           responseWaitStartedAt,
+          processingStartedAt,
+          compacting,
+          turnProcessing: Object.fromEntries(turnProcessing),
           pendingUserMessages: pendingUserMessages(),
         },
         {
@@ -1033,6 +1560,8 @@ export default function atomWeb(pi) {
       responseWaitStartedAt = null;
     }
     liveRunId ??= `${ctx.sessionManager.getSessionId()}:live:${randomUUID()}`;
+    thinkingTracker.track(event.message);
+    thinkingTracker.settle(event.message);
     liveMessage = { ...event.message, id: liveRunId };
     publish(ctx, { liveMessage, responseWaitStartedAt });
   });
@@ -1045,6 +1574,12 @@ export default function atomWeb(pi) {
           afterEntryId: ctx.sessionManager.getBranch().at(-1)?.id ?? null,
           message: event.message,
           content: JSON.stringify(event.message.content),
+        });
+      const settled = thinkingTracker.finish();
+      if (liveRunId && Object.keys(settled).length)
+        pendingThinkingSettles.set(liveRunId, {
+          sessionId: ctx.sessionManager.getSessionId(),
+          settled,
         });
       liveMessage = null;
       liveRunId = null;
@@ -1067,9 +1602,12 @@ export default function atomWeb(pi) {
         record.acceptedContent = event.message.content;
         responseWaitOwnerId = record.message.id;
         responseWaitStartedAt ||= Date.now();
+        processingStartedAt ||= responseWaitStartedAt;
       }
     } else if (event.message?.role === "assistant") {
       liveRunId ??= `${ctx.sessionManager.getSessionId()}:live:${randomUUID()}`;
+      thinkingTracker.reset();
+      thinkingTracker.track(event.message);
       if (responseWaitOwnerId) {
         responseWaitOwnerId = null;
         responseWaitStartedAt = null;
@@ -1081,6 +1619,7 @@ export default function atomWeb(pi) {
         busy: !ctx.isIdle(),
         pending: ctx.hasPendingMessages(),
         responseWaitStartedAt,
+        processingStartedAt,
       },
       { history: true },
     );
@@ -1133,6 +1672,8 @@ export default function atomWeb(pi) {
     stopPromptQueueListener = undefined;
     stopRendererObserver();
     detachNotifications();
+    thinkingTracker.reset();
+    pendingThinkingSettles.clear();
     await stateStore?.close();
     stateStore = undefined;
     displayRecords.length = 0;

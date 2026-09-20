@@ -107,7 +107,7 @@ export function editHunks(args) {
 export function parseToolDiff(value) {
   return String(value ?? "")
     .split("\n")
-    .filter((line) => line.trim() !== "" && !/^\s*\.\.\.\s*$/.test(line))
+    .filter((line) => !/^\s*\.\.\.\s*$/.test(line))
     .map((line) => {
       const match = /^([+-\s])(\s*\d*)\s(.*)$/.exec(line);
       if (!match) return { kind: "context", lineNumber: "", content: line };

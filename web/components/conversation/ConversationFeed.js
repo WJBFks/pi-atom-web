@@ -14,7 +14,12 @@ import LiveFeed from "./LiveFeed.js";
 
 export default defineComponent({
   name: "ConversationFeed",
-  props: { trace: Boolean, onLoadOlderHistory: Function },
+  props: {
+    trace: Boolean,
+    token: String,
+    onError: Function,
+    onLoadOlderHistory: Function,
+  },
   emits: ["atBottomChange"],
   setup(props, { emit, expose }) {
     const conversation = useConversationStore();
@@ -104,8 +109,16 @@ export default defineComponent({
     return () =>
       h("div", { id: "scroll", ref: scroll, onScroll, onWheel }, [
         h("div", { id: "messages" }, [
-          h(HistoryFeed, { trace: props.trace }),
-          h(LiveFeed, { trace: props.trace }),
+          h(HistoryFeed, {
+            trace: props.trace,
+            token: props.token,
+            onError: props.onError,
+          }),
+          h(LiveFeed, {
+            trace: props.trace,
+            token: props.token,
+            onError: props.onError,
+          }),
           !conversation.messages.length &&
             !conversation.pendingUserMessages.length &&
             conversation.responseWaitStartedAt == null &&

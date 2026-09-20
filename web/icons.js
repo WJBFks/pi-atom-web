@@ -23,6 +23,8 @@ const iconPaths = {
     '<path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 8A7 7 0 0 1 18 6l2 6M17.9 16A7 7 0 0 1 6 18l-2-6"/>',
   copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5H5v11h3"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16Z"/><path d="m13 7 4 4"/>',
+  "chevron-left": '<path d="m14 6-6 6 6 6"/>',
+  "chevron-right": '<path d="m10 6 6 6-6 6"/>',
   reload: '<path d="M20 11a8 8 0 1 0-2.4 5.7"/><path d="M20 5v6h-6"/>',
   reset: '<path d="M4 13a8 8 0 1 0 2.4-5.7"/><path d="M4 7v6h6"/>',
   // 折叠块左侧的类型图标（工具各用一个独立图标）

@@ -4,6 +4,7 @@ import { reactive } from "vue";
 import {
   normalizeAnswers,
   answerText,
+  answerItems,
   serializeAnswers,
   sanitizeQuestions,
 } from "../web/packages/@juicesharp/rpiv-ask-user-question/answers.js";
@@ -145,4 +146,40 @@ test("multi checkbox, free text and their checked states survive each other's ed
   assert.equal(reordered.custom, true);
   assert.equal(reordered.text, "自定义");
   assert.deepEqual(reordered.options, [0]);
+});
+
+test("review page numbers selected options and marks custom input with X", () => {
+  const single = [{ header: "单选", options: [{ label: "A" }, { label: "B" }] }];
+  const multi = [
+    { header: "多选", multiSelect: true, options: [{ label: "A" }, { label: "B" }, { label: "C" }] },
+  ];
+  // 单选：1. 选项
+  assert.deepEqual(
+    answerItems(single[0], normalizeAnswers(single, [{ kind: "option", option: 1 }])[0]),
+    [{ mark: "1", text: "B" }],
+  );
+  // 单选 + 自定义：X. 文本
+  assert.deepEqual(
+    answerItems(single[0], normalizeAnswers(single, [{ kind: "custom", text: "自定义回答" }])[0]),
+    [{ mark: "X", text: "自定义回答" }],
+  );
+  // 多选：按勾选顺序编号，自定义输入排在后面用 X.
+  assert.deepEqual(
+    answerItems(
+      multi[0],
+      normalizeAnswers(multi, [{ kind: "multi", options: [2, 0], custom: true, text: "其他内容" }])[0],
+    ),
+    [
+      { mark: "1", text: "C" },
+      { mark: "2", text: "A" },
+      { mark: "X", text: "其他内容" },
+    ],
+  );
+  // 未回答：空列表
+  assert.deepEqual(answerItems(multi[0], normalizeAnswers(multi, [null])[0]), []);
+  // 勾上自由文本行但还没输入：不出 X. 行
+  assert.deepEqual(
+    answerItems(multi[0], normalizeAnswers(multi, [{ kind: "multi", options: [], custom: true, text: "" }])[0]),
+    [],
+  );
 });

@@ -1,8 +1,6 @@
 /** @typedef {{ schemaVersion: 1, type: 'snapshot'|'patch', streamId: string, sequence: number, sessionId: string, snapshot?: object, patch?: object }} ServerEvent */
 
 const MAX_TEXT_LENGTH = 256 * 1024;
-const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const MAX_IMAGE_BASE64 = Math.ceil((8 * 1024 * 1024 * 4) / 3) + 4;
 // 单次向前补的历史上限（服务端每页远小于它，仅作为不可信输入的上限）。
 const MAX_HISTORY_MESSAGES = 2000;
 
@@ -117,9 +115,52 @@ function message(value, name = "message") {
       empty: true,
       max: MAX_TEXT_LENGTH,
     });
+    // 压缩前 token 数（摘要行「从N个token中压缩」）；缺失时前端退化为「上下文已压缩」。
+    if (
+      "tokensBefore" in item &&
+      (!Number.isFinite(item.tokensBefore) || item.tokensBefore < 0)
+    )
+      fail(`${name}.tokensBefore 无效`);
+    // 压缩条目上的完成行（`压缩完成（耗时…）`，由服务端从命令记录移过来）
+    if ("compaction" in item) compactionField(item.compaction, name);
     return;
   }
   content(item.content);
+  // 用户提示词状态行所需的附加字段：消息时间戳（本地展示）与同一父节点下的
+  // 兄弟分支信息（Pi 会话树：同一父节点下的多个 user 子节点即平行会话）。
+  if ("timestamp" in item) {
+    if (!Number.isFinite(item.timestamp) || item.timestamp < 0)
+      fail(`${name}.timestamp 无效`);
+  }
+  if ("branch" in item) {
+    const branch = object(item.branch, `${name}.branch`);
+    if (!Number.isInteger(branch.index) || branch.index < 1)
+      fail(`${name}.branch.index 无效`);
+    if (!Number.isInteger(branch.count) || branch.count < 2)
+      fail(`${name}.branch.count 无效`);
+    if (branch.index > branch.count) fail(`${name}.branch.index 超出`);
+    for (const key of ["prev", "next"])
+      if (branch[key] !== null && typeof branch[key] !== "string")
+        fail(`${name}.branch.${key} 无效`);
+  }
+  // 压缩执行状态：运行中只有 startedAt（挂在命令记录上），
+  // 完成后带 endedAt（挂在命令记录或压缩条目上）。
+  if ("compaction" in item) compactionField(item.compaction, name);
+}
+/**
+ * 压缩执行状态：`{ startedAt, endedAt? }`。运行中只有 startedAt（命令横线下方显示
+ * 「正在压缩上下文...（x秒）」），完成后带 endedAt（「压缩完成（耗时…）」）。
+ */
+function compactionField(value, name) {
+  const compaction = object(value, `${name}.compaction`);
+  if (!Number.isFinite(compaction.startedAt) || compaction.startedAt < 0)
+    fail(`${name}.compaction.startedAt 无效`);
+  if (
+    "endedAt" in compaction &&
+    (!Number.isFinite(compaction.endedAt) ||
+      compaction.endedAt < compaction.startedAt)
+  )
+    fail(`${name}.compaction.endedAt 无效`);
 }
 function model(value, name = "model") {
   const item = object(value, name);
@@ -166,6 +207,20 @@ function disclosures(value, name) {
     if (typeof open !== "boolean") fail(`${name}.${id} 无效`);
   }
 }
+function images(value, name) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) fail(`${name} 无效`);
+  for (const image of value) {
+    const item = object(image, name);
+    keysOnly(item, ["type", "mimeType", "data"], name);
+    if ("type" in item && item.type !== "image") fail(`${name}.type 无效`);
+    if (typeof item.mimeType !== "string" || !/^image\/[A-Za-z0-9.+-]+$/i.test(item.mimeType))
+      fail(`${name}.mimeType 无效`);
+    if (typeof item.data !== "string" || !item.data || !/^[A-Za-z0-9+/]*={0,2}$/.test(item.data))
+      fail(`${name}.data 无效`);
+  }
+  return value;
+}
 function promptQueue(value) {
   const queue = object(value, "promptQueue");
   keysOnly(queue, ["revision", "count", "steering", "followUp"], "promptQueue");
@@ -176,11 +231,12 @@ function promptQueue(value) {
       fail(`promptQueue.${kind} 无效`);
     for (const [position, value] of items.entries()) {
       const item = object(value, `promptQueue.${kind}`);
-      keysOnly(item, ["id", "kind", "index", "text"], `promptQueue.${kind}`);
+      keysOnly(item, ["id", "kind", "index", "text", "images"], `promptQueue.${kind}`);
       string(item.id, "promptQueue.id", { max: 1024 });
       if (item.kind !== kind || item.index !== position)
         fail(`promptQueue.${kind} 顺序无效`);
-      string(item.text, "promptQueue.text", { max: MAX_TEXT_LENGTH });
+      string(item.text, "promptQueue.text", { empty: true, max: MAX_TEXT_LENGTH });
+      images(item.images, "promptQueue.images");
     }
   };
   validateItems(queue.steering, "steer");
@@ -197,17 +253,7 @@ export function validateAction(value) {
     case "send":
       keysOnly(action, ["type", "sessionId", "text", "images", "mode"], "send");
       string(action.text, "text", { empty: true, max: MAX_TEXT_LENGTH });
-      if (action.images !== undefined && !Array.isArray(action.images)) fail("send.images 无效");
-      if ((action.images || []).length > 4) fail("send.images 无效");
-      let imageBytes = 0;
-      for (const image of action.images || []) {
-        keysOnly(object(image, "image"), ["mimeType", "data"], "image");
-        if (!IMAGE_TYPES.has(image.mimeType)) fail("图片格式不受支持");
-        string(image.data, "image.data", { max: MAX_IMAGE_BASE64 });
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)) fail("图片数据无效");
-        imageBytes += Math.floor((image.data.length * 3) / 4);
-      }
-      if (imageBytes > 16 * 1024 * 1024) fail("图片总大小超过限制");
+      images(action.images, "send.images");
       if ((!action.text.trim() && !(action.images || []).length) || !["followUp", "steer"].includes(action.mode))
         fail("send 参数无效");
       break;
@@ -248,8 +294,9 @@ export function validateAction(value) {
       }
       break;
     case "save_ui_state":
-      keysOnly(action, ["type", "sessionId", "thinkingTimings", "disclosures"], "save_ui_state");
-      timings(action.thinkingTimings || {}, "thinkingTimings");
+      // 思考时长由后端从事件流计算并落盘（extensions/thinking-timings.ts），
+      // 浏览器不再回传 thinkingTimings；这里只接收手动折叠状态。
+      keysOnly(action, ["type", "sessionId", "disclosures"], "save_ui_state");
       disclosures(action.disclosures || {}, "disclosures");
       break;
     case "more_history":
@@ -258,9 +305,11 @@ export function validateAction(value) {
       string(action.cursor, "cursor", { max: 512 });
       break;
     case "queue_add":
-      keysOnly(action, ["type", "sessionId", "kind", "text"], "queue_add");
+      keysOnly(action, ["type", "sessionId", "kind", "text", "images"], "queue_add");
       if (!["steer", "followUp"].includes(action.kind)) fail("queue_add.kind 无效");
-      string(action.text, "queue_add.text", { max: MAX_TEXT_LENGTH });
+      string(action.text, "queue_add.text", { empty: true, max: MAX_TEXT_LENGTH });
+      images(action.images, "queue_add.images");
+      if (!action.text.trim() && !(action.images || []).length) fail("queue_add 内容不能为空");
       break;
     case "queue_remove":
       keysOnly(action, ["type", "sessionId", "id", "revision"], "queue_remove");
@@ -269,14 +318,28 @@ export function validateAction(value) {
         fail("queue_remove.revision 无效");
       break;
     case "queue_update_item":
-      keysOnly(action, ["type", "sessionId", "id", "revision", "kind", "text"], "queue_update_item");
+      keysOnly(action, ["type", "sessionId", "id", "revision", "kind", "text", "images"], "queue_update_item");
       string(action.id, "queue_update_item.id", { max: 1024 });
       if (!Number.isInteger(action.revision) || action.revision < 0)
         fail("queue_update_item.revision 无效");
       if (!["steer", "followUp"].includes(action.kind))
         fail("queue_update_item.kind 无效");
-      string(action.text, "queue_update_item.text", { max: MAX_TEXT_LENGTH });
-      if (!action.text.trim()) fail("queue_update_item.text 不能为空");
+      string(action.text, "queue_update_item.text", { empty: true, max: MAX_TEXT_LENGTH });
+      images(action.images, "queue_update_item.images");
+      if (!action.text.trim() && !(action.images || []).length)
+        fail("queue_update_item 内容不能为空");
+      break;
+    case "edit_user_message":
+      // 编辑用户提示词并重发：服务端先中断当前生成，再导航到该消息的父节点、以新文本
+      // 重开该轮，新消息因此成为原消息的兄弟分支。
+      keysOnly(action, ["type", "sessionId", "entryId", "text"], "edit_user_message");
+      string(action.entryId, "edit_user_message.entryId", { max: 1024 });
+      string(action.text, "edit_user_message.text", { empty: true, max: MAX_TEXT_LENGTH });
+      break;
+    case "navigate_branch":
+      // 在平行分支间切换：entryId 是目标兄弟用户消息，服务端解析其子树末端后导航过去。
+      keysOnly(action, ["type", "sessionId", "entryId"], "navigate_branch");
+      string(action.entryId, "navigate_branch.entryId", { max: 1024 });
       break;
     default:
       fail("action type 无效");
@@ -296,12 +359,39 @@ function validateField(key, value) {
       break;
     case "busy":
     case "pending":
+    case "compacting":
+    case "restarting":
       if (typeof value !== "boolean") fail(`${key} 无效`);
       break;
     case "responseWaitStartedAt":
+    // 本轮任务真正开始的时刻（prompt 被接管的瞬间）。与 responseWaitStartedAt 不同：
+    // 它跨越整轮（含工具调用、多轮往返），只在整轮结束时清空。
+    case "processingStartedAt":
       if (value !== null && (!Number.isFinite(value) || value < 0))
         fail(`${key} 无效`);
       break;
+    // 每轮的已结算时长：key = 该轮最终输出那条消息的客户端 id，
+    // value = { startedAt, durationMs }。前端在每一轮输出下方显示「已完成（时长）」。
+    case "turnProcessing": {
+      const entries = object(value, key);
+      if (Object.keys(entries).length > 500) fail(`${key} 过多`);
+      for (const timing of Object.values(entries)) {
+        object(timing, `${key} 项`);
+        if (
+          !Number.isFinite(timing.startedAt) ||
+          !Number.isFinite(timing.durationMs) ||
+          timing.durationMs < 0
+        )
+          fail(`${key} 项无效`);
+        if (
+          timing.status !== undefined &&
+          timing.status !== "done" &&
+          timing.status !== "interrupted"
+        )
+          fail(`${key} 项 status 无效`);
+      }
+      break;
+    }
     case "thinking":
       string(value, key);
       break;
@@ -340,6 +430,10 @@ function validateField(key, value) {
     case "historyComplete":
       if (typeof value !== "boolean") fail("historyComplete 无效");
       break;
+    case "historyRevision":
+      if (!Number.isSafeInteger(value) || value < 0)
+        fail("historyRevision 无效");
+      break;
     case "pendingUserMessages":
       for (const item of value || []) {
         message(item, "pendingUserMessage");
@@ -367,6 +461,57 @@ function validateField(key, value) {
     case "disclosures":
       disclosures(value, key);
       break;
+    case "agentResources": {
+      const res = object(value, key);
+      for (const listKey of ["skills", "extensions", "prompts"]) {
+        const list = res[listKey];
+        if (!Array.isArray(list) || list.length > 500)
+          fail(`${key}.${listKey} 无效`);
+        for (const item of list) {
+          const it = object(item, `${key}.${listKey} 项`);
+          string(it.name, `${key}.${listKey}.name`);
+          string(it.path, `${key}.${listKey}.path`, { empty: true });
+          if (!["global", "project", "package"].includes(it.source))
+            fail(`${key}.${listKey}.source 无效`);
+          if (it.description !== undefined)
+            string(it.description, `${key}.${listKey}.description`, {
+              empty: true,
+            });
+          if (it.sourceName !== undefined)
+            string(it.sourceName, `${key}.${listKey}.sourceName`);
+        }
+      }
+      const def = object(res.definition, `${key}.definition`);
+      if (!Array.isArray(def.contextFiles) || def.contextFiles.length > 64)
+        fail(`${key}.definition.contextFiles 无效`);
+      for (const item of def.contextFiles) {
+        const it = object(item, `${key}.contextFiles 项`);
+        string(it.path, `${key}.contextFiles.path`);
+        if (!Number.isFinite(it.size) || it.size < 0)
+          fail(`${key}.contextFiles.size 无效`);
+      }
+      if (def.systemPromptFile !== null)
+        string(def.systemPromptFile, `${key}.definition.systemPromptFile`);
+      if (def.appendSystemPromptFile !== null)
+        string(
+          def.appendSystemPromptFile,
+          `${key}.definition.appendSystemPromptFile`,
+        );
+      if (!Array.isArray(def.settings) || def.settings.length > 8)
+        fail(`${key}.definition.settings 无效`);
+      for (const item of def.settings) {
+        const it = object(item, `${key}.settings 项`);
+        string(it.path, `${key}.settings.path`);
+        if (typeof it.exists !== "boolean")
+          fail(`${key}.settings.exists 无效`);
+      }
+      if (!Array.isArray(def.packages) || def.packages.length > 128)
+        fail(`${key}.definition.packages 无效`);
+      for (const p of def.packages) string(p, `${key}.packages 项`);
+      if (typeof def.projectTrusted !== "boolean")
+        fail(`${key}.definition.projectTrusted 无效`);
+      break;
+    }
     default:
       fail(`patch.${key} 不受支持`);
   }

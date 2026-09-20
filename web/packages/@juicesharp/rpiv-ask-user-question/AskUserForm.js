@@ -12,6 +12,7 @@ import {
   normalizeAnswers,
   blankAnswer,
   answerText,
+  answerItems,
   serializeAnswers,
   sanitizeQuestions,
   isAnswered,
@@ -196,11 +197,31 @@ export default defineComponent({
           h("h3", "核对答案"),
           ...questions.map((q, index) =>
             h("section", { key: index, class: "ask-review" }, [
-              h("strong", q.header),
-              h("div", answerText(q, state.answers[index])),
+              h("div", { class: "ask-review-head" }, [
+                h("strong", q.header),
+                button("修改", {
+                  class: "ask-review-edit",
+                  "data-ask-review-edit": index,
+                  onClick: () => tab(index),
+                }),
+              ]),
+              (() => {
+                const items = answerItems(q, state.answers[index]);
+                return items.length
+                  ? h(
+                      "div",
+                      { class: "ask-review-answers" },
+                      items.map((item, i) =>
+                        h("div", { class: "answer-line", key: i }, [
+                          h("span", { class: "answer-mark" }, `${item.mark}.`),
+                          h("span", { class: "answer-text" }, item.text),
+                        ]),
+                      ),
+                    )
+                  : h("div", { class: "answer-line unanswered" }, "未回答");
+              })(),
               state.answers[index].notes &&
                 h("small", `备注：${state.answers[index].notes}`),
-              button("修改", { onClick: () => tab(index) }),
             ]),
           ),
         );

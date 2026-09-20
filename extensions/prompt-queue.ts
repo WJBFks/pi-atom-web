@@ -9,13 +9,41 @@ function hashText(value) {
   return (hash >>> 0).toString(36);
 }
 
+function messageParts(message) {
+  if (typeof message === "string") return { text: message, images: [] };
+  if (message && typeof message === "object" && Array.isArray(message.content)) {
+    return {
+      text: message.content
+        .filter((part) => part?.type === "text")
+        .map((part) => String(part.text || ""))
+        .join("\n"),
+      images: message.content
+        .filter((part) => part?.type === "image")
+        .map((part) => ({ type: "image", mimeType: String(part.mimeType || ""), data: String(part.data || "") })),
+    };
+  }
+  return {
+    text: String(message?.text || ""),
+    images: [...(message?.images || [])].map((part) => ({
+      type: "image",
+      mimeType: String(part?.mimeType || ""),
+      data: String(part?.data || ""),
+    })),
+  };
+}
+
 function queueItems(kind, messages) {
-  return [...(messages || [])].map((text, index) => ({
-    id: `${kind}:${index}:${hashText(text)}`,
-    kind,
-    index,
-    text: String(text),
-  }));
+  return [...(messages || [])].map((message, index) => {
+    const { text, images } = messageParts(message);
+    const signature = `${text}\0${images.map((image) => `${image.mimeType}:${image.data}`).join("\0")}`;
+    return {
+      id: `${kind}:${index}:${hashText(signature)}`,
+      kind,
+      index,
+      text,
+      images,
+    };
+  });
 }
 
 export function promptQueueSnapshot(steering = [], followUp = [], revision = 0) {
@@ -37,12 +65,34 @@ export function createPromptQueueBridge() {
     if (!state) throw new Error("当前 Pi 会话不支持 Prompt 队列管理");
     return state;
   };
-  const read = (state) =>
-    promptQueueSnapshot(
-      state.session.getSteeringMessages?.() || [],
-      state.session.getFollowUpMessages?.() || [],
+  const fullQueue = (state, kind, fallback) => {
+    const internal = state.session.agent?.[kind]?.messages;
+    return Array.isArray(internal) ? internal : fallback;
+  };
+  const repairImageOnlyMirror = (session, kind, getter) => {
+    const visible = session[getter]?.();
+    const actual = session.agent?.[kind]?.messages;
+    if (!Array.isArray(visible) || !Array.isArray(actual) || visible.length <= actual.length)
+      return false;
+    const excess = visible.length - actual.length;
+    let remaining = excess;
+    for (let index = 0; index < visible.length && remaining > 0; ) {
+      if (visible[index] === "") {
+        visible.splice(index, 1);
+        remaining -= 1;
+      } else index += 1;
+    }
+    return remaining < excess;
+  };
+  const read = (state) => {
+    const steering = state.session.getSteeringMessages?.() || [];
+    const followUp = state.session.getFollowUpMessages?.() || [];
+    return promptQueueSnapshot(
+      fullQueue(state, "steeringQueue", steering),
+      fullQueue(state, "followUpQueue", followUp),
       state.revision,
     );
+  };
   const notify = (state) => {
     const snapshot = read(state);
     for (const listener of state.listeners) listener(snapshot);
@@ -50,7 +100,12 @@ export function createPromptQueueBridge() {
   };
   const changed = (state) => {
     state.revision += 1;
-    if (!state.suppressed) notify(state);
+    if (state.suppressed || state.notifyScheduled) return;
+    state.notifyScheduled = true;
+    queueMicrotask(() => {
+      state.notifyScheduled = false;
+      if (!state.suppressed) notify(state);
+    });
   };
   const locate = (snapshot, target) => {
     if (target?.revision !== snapshot.revision)
@@ -65,8 +120,8 @@ export function createPromptQueueBridge() {
     state.suppressed = true;
     try {
       state.session.clearQueue();
-      for (const text of steering) await state.session.steer(text);
-      for (const text of followUp) await state.session.followUp(text);
+      for (const item of steering) await state.session.steer(item.text, item.images);
+      for (const item of followUp) await state.session.followUp(item.text, item.images);
     } finally {
       state.suppressed = false;
       // clear + requeue 不是事务。即使某次重新入队失败，也必须把 Pi
@@ -88,10 +143,27 @@ export function createPromptQueueBridge() {
         revision: 0,
         listeners: new Set(),
         suppressed: false,
+        notifyScheduled: false,
         unsubscribe: undefined,
       };
       state.unsubscribe = session.subscribe?.((event) => {
         if (event?.type === "queue_update") changed(state);
+        // Pi 0.85 only removes its public text mirror when a dequeued user
+        // message has text. Image-only messages still disappear from the real
+        // agent queue, so publish that authoritative change on message_start.
+        if (event?.type === "message_start" && event.message?.role === "user") {
+          const repairedSteering = repairImageOnlyMirror(
+            session,
+            "steeringQueue",
+            "getSteeringMessages",
+          );
+          const repairedFollowUp = repairImageOnlyMirror(
+            session,
+            "followUpQueue",
+            "getFollowUpMessages",
+          );
+          if (repairedSteering || repairedFollowUp) changed(state);
+        }
       });
       sessions.set(sessionManager, state);
     },
@@ -104,13 +176,13 @@ export function createPromptQueueBridge() {
       listener(read(state));
       return () => state.listeners.delete(listener);
     },
-    async add(sessionManager, kind, text) {
+    async add(sessionManager, kind, text, images = []) {
       const state = stateFor(sessionManager);
       const value = String(text || "").trim();
-      if (!value) throw new Error("排队内容不能为空");
+      if (!value && !images.length) throw new Error("排队内容不能为空");
       const before = state.revision;
-      if (kind === "steer") await state.session.steer(value);
-      else if (kind === "followUp") await state.session.followUp(value);
+      if (kind === "steer") await state.session.steer(value, images);
+      else if (kind === "followUp") await state.session.followUp(value, images);
       else throw new Error("未知的 Prompt 队列类型");
       if (state.revision === before) changed(state);
       return read(state);
@@ -166,10 +238,10 @@ export function createPromptQueueBridge() {
       const removed = locate(before, target);
       const steering = before.steering
         .filter((item) => item.id !== removed.id)
-        .map((item) => item.text);
+        .map((item) => ({ text: item.text, images: item.images }));
       const followUp = before.followUp
         .filter((item) => item.id !== removed.id)
-        .map((item) => item.text);
+        .map((item) => ({ text: item.text, images: item.images }));
       const queue = await rebuild(state, steering, followUp);
       return { removed, queue };
     },
@@ -178,21 +250,22 @@ export function createPromptQueueBridge() {
       const before = read(state);
       const previous = locate(before, target);
       const text = String(target?.text || "").trim();
-      if (!text) throw new Error("Prompt 内容不能为空");
+      const images = Array.isArray(target?.images) ? target.images : previous.images;
+      if (!text && !images.length) throw new Error("Prompt 内容不能为空");
       if (!["steer", "followUp"].includes(target?.kind))
         throw new Error("未知的 Prompt 队列类型");
       const steering = before.steering
         .filter((item) => item.id !== previous.id)
-        .map((item) => item.text);
+        .map((item) => ({ text: item.text, images: item.images }));
       const followUp = before.followUp
         .filter((item) => item.id !== previous.id)
-        .map((item) => item.text);
+        .map((item) => ({ text: item.text, images: item.images }));
       const destination = target.kind === "steer" ? steering : followUp;
       const destinationIndex =
         previous.kind === target.kind
           ? Math.min(previous.index, destination.length)
           : destination.length;
-      destination.splice(destinationIndex, 0, text);
+      destination.splice(destinationIndex, 0, { text, images });
       const queue = await rebuild(state, steering, followUp);
       const updated = (target.kind === "steer" ? queue.steering : queue.followUp)[
         destinationIndex

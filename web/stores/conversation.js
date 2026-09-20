@@ -141,6 +141,19 @@ export function applyConversationSnapshot(state, snapshot) {
     state.pendingUserMessages = snapshot.pendingUserMessages || [];
   if (Object.hasOwn(snapshot, "responseWaitStartedAt"))
     state.responseWaitStartedAt = snapshot.responseWaitStartedAt;
+  // 本轮任务真正开始的时刻（服务端给的、跨越整轮），前端只用它算处理时长。
+  if (Object.hasOwn(snapshot, "processingStartedAt"))
+    state.processingStartedAt = snapshot.processingStartedAt;
+  if (Object.hasOwn(snapshot, "compacting"))
+    state.compacting = snapshot.compacting;
+  // 服务端「编辑重发/重开该轮」进行中：结束（或断开）时清掉前端提示。
+  if (Object.hasOwn(snapshot, "restarting")) {
+    state.restarting = Boolean(snapshot.restarting);
+    if (!state.restarting) state.restartingId = null;
+  }
+  // 每轮的已结算时长（key = 该轮最终输出消息的 id），贴在每轮输出下方显示「已完成（时长）」。
+  if (Object.hasOwn(snapshot, "turnProcessing"))
+    state.turnProcessing = snapshot.turnProcessing || {};
   if (Object.hasOwn(snapshot, "liveMessage"))
     state.liveMessage = snapshot.liveMessage;
 
@@ -186,6 +199,14 @@ export const useConversationStore = defineStore("conversation", {
     liveMessage: null,
     pendingUserMessages: [],
     responseWaitStartedAt: null,
+    processingStartedAt: null,
+    turnProcessing: {},
+    compacting: false,
+    // 用户提示词状态行：原位编辑的目标消息 `{ id, text }`、「正在重启该轮」的目标消息 id，
+    // 以及服务端下发的重启中标记。
+    userEdit: null,
+    restartingId: null,
+    restarting: false,
     tools: [],
     toolTimings: {},
     historyTools: buildToolContext(),
@@ -196,10 +217,32 @@ export const useConversationStore = defineStore("conversation", {
     revision: 0,
     // 更早的历史是否已经全部取回；加载时是否把已加载的中间过程全部折叠。
     historyComplete: false,
+    // 同一 session 内当前会话树分支的版本；变化时 messages 是替换而非滑动窗口并集。
+    historyRevision: 0,
     collapseLoaded: true,
     prependedCount: 0,
   }),
   actions: {
+    beginUserEdit(id, text) {
+      this.userEdit = { id: String(id), text: String(text ?? "") };
+      this.revision += 1;
+    },
+    setUserEditText(text) {
+      if (!this.userEdit) return;
+      this.userEdit = { ...this.userEdit, text: String(text ?? "") };
+    },
+    cancelUserEdit() {
+      if (!this.userEdit) return;
+      this.userEdit = null;
+      this.revision += 1;
+    },
+    /** 提交编辑：收起编辑器并记住是哪条消息在重启（内容由服务端 restarting 标记收尾）。 */
+    markRestarting(id) {
+      this.userEdit = null;
+      this.restartingId = id ? String(id) : null;
+      this.restarting = true;
+      this.revision += 1;
+    },
     addOptimisticUserMessage(content) {
       const message = {
         id: `browser-pending:${Date.now()}:${Math.random().toString(16).slice(2)}`,
@@ -233,6 +276,7 @@ export const useConversationStore = defineStore("conversation", {
         this.toolTimings,
       );
       this.historyComplete = snapshot.historyComplete !== false;
+      this.historyRevision = Number(snapshot.historyRevision) || 0;
       // 首次加载：已加载的中间过程全部折叠（正在生成的那一轮由 busy 决定）。
       this.collapseLoaded = true;
       this.prependedCount = 0;
@@ -246,10 +290,17 @@ export const useConversationStore = defineStore("conversation", {
         : previousLive;
       this.finishThinking(previousLive, nextLive);
       let migrated = false;
+      const replacingHistory =
+        Object.hasOwn(patch, "historyRevision") &&
+        patch.historyRevision !== this.historyRevision;
+      if (Object.hasOwn(patch, "historyRevision"))
+        this.historyRevision = patch.historyRevision;
       if ("messages" in patch)
         migrated = applyConversationSnapshot(this, {
-          // 并集：窗口滑动不会丢已加载的轮次
-          messages: mergeHistory(this.messages, patch.messages),
+          // 普通窗口滑动做并集；树分支变化时丢弃已离开活跃分支的节点。
+          messages: replacingHistory
+            ? patch.messages
+            : mergeHistory(this.messages, patch.messages),
           liveMessage: nextLive,
         });
       else if ("liveMessage" in patch) this.liveMessage = nextLive;
@@ -268,6 +319,15 @@ export const useConversationStore = defineStore("conversation", {
         this.pendingUserMessages = patch.pendingUserMessages || [];
       if ("responseWaitStartedAt" in patch)
         this.responseWaitStartedAt = patch.responseWaitStartedAt;
+      if ("processingStartedAt" in patch)
+        this.processingStartedAt = patch.processingStartedAt;
+      if ("compacting" in patch) this.compacting = patch.compacting;
+      if ("restarting" in patch) {
+        this.restarting = Boolean(patch.restarting);
+        if (!this.restarting) this.restartingId = null;
+      }
+      if ("turnProcessing" in patch)
+        this.turnProcessing = patch.turnProcessing || {};
       if ("tools" in patch) this.tools = patch.tools || [];
       if ("toolTimings" in patch) this.toolTimings = patch.toolTimings || {};
       if ("thinkingTimings" in patch)
@@ -306,9 +366,9 @@ export const useConversationStore = defineStore("conversation", {
       return first ? String(messageId(first)) : null;
     },
     configurePersistence(handler) {
+      // 思考时长由后端从事件流计算并落盘，浏览器只回传手动折叠状态。
       this.persistUiState = () =>
         handler({
-          thinkingTimings: Object.fromEntries(this.thinkingTimes),
           disclosures: Object.fromEntries(this.disclosures),
         });
     },
@@ -340,7 +400,7 @@ export const useConversationStore = defineStore("conversation", {
       );
     },
     finalizeThinking(keys, now = Date.now()) {
-      let changed = false;
+      // 本地结算仅用于展示连续（停止计时），落盘由后端 thinkingTracker 负责。
       for (const key of keys) {
         const timing = this.thinkingTimes.get(key);
         if (!timing || timing.durationMs != null) continue;
@@ -348,9 +408,7 @@ export const useConversationStore = defineStore("conversation", {
           ...timing,
           durationMs: Math.max(0, now - timing.startedAt),
         });
-        changed = true;
       }
-      if (changed) this.persistUiState?.();
     },
   },
 });
