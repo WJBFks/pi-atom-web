@@ -42,6 +42,11 @@
 
 - pi 扩展后端使用 `.ts` 文件：已复现当前加载器会缓存原生 ESM `.js`，即使重新加载仍调用旧工厂；不要改回 `.js`。浏览器继续使用 `shared/protocol.js`，后端必须使用内容同步的 `shared/protocol.ts`，避免 `/reload` 后继续引用旧协议校验器。
 
+- **浏览器侧的第三方库全部从 `node_modules/` 直读，仓库里没有 `web/vendor/` 目录**：`web/index.html` 引的 `marked.js` / `purify.js` / `highlight.js` 与 importmap 里的 `./vendor/vue.js`、`./vendor/pinia.js`、`./vendor/vue-router.js`、`./vendor/devtools-api/` 都不是仓库文件，而是 `extensions/server.ts` 挂载表指向的 `../node_modules/...`（vue = `dist/vue.runtime.esm-browser.prod.js`、pinia = `dist/pinia.esm-browser.js`、vue-router = `dist/vue-router.esm-browser.prod.js`、devtools-api = 扫 `lib/esm/` 整目录）；`/xterm.js`、`/xterm.css` 与七个 `/fonts/*.woff2` 同理。所以 **`npm ci` 是运行期硬依赖，不是开发选项**，缺依赖的表现是白屏 + console 报 `Failed to resolve module specifier "vue"`，而不是报错缺文件。**不得为此创建 `web/vendor/`、生成产物或将依赖改回 CDN**（禁 CDN 见首条；importmap 的字节受 CSP sha256 保护，见 §3）。
+
+- **`INSTALL.md` 是面向 agent 的安装手册**：安装步骤、依赖为什么必需、`/reload` → `/web` 的加载顺序、运行期写入文件清单（`~/.pi/atom/web/{config.json,sessions.json,gateway-<端口>.key}` 与会话的 `web-state.json`）与故障排查以它为准。`README.md` 标题下那句 blockquote 是给人复制发给 agent 的一键安装 prompt，**改动依赖、安装步骤、命令、端口或运行期文件路径时必须同步 `INSTALL.md`**（prompt 文案本身只在步骤变化时改）。
+
+
 ## 2. 协议字段与 SSE 传输
 
 - `shared/protocol.js` 同时供扩展和浏览器校验；快照与事件使用 `schemaVersion:1`，事件包含 `streamId/sequence/sessionId`。首次/切会发送 snapshot，其余发送 patch；live-only 更新不得遍历、复制或发送历史。**历史分页**：快照、显式 `messages` patch 和 `historyDirty` 延迟刷新都必须在出口统一由 `extensions/history-window.ts` 裁成「最近 `HISTORY_TURNS`（10）轮」的窗口 + `historyComplete`，用户提交 prompt 时不得借刷新路径发送完整历史；更早的历史由客户端用 `more_history`（带 `cursor` = 它当前最老一条的 id）逆序向前翻页，服务端用 `prependMessages` 推送，每页 5 轮。普通窗口滑动时客户端只能对历史做**并集**（`mergeHistory`）：首个快照里 10 轮的窗口会随新轮向前滑动，若用替换语义就会在对话中间缺一轮；唯一例外是同一 session 的会话树分支切换，服务端递增 `historyRevision` 并在同一 patch 下发当前分支窗口，客户端必须替换旧分支历史，避免把兄弟分支纵向拼接。客户端仅在用户滚动或向上滚轮到消息区顶部时取一页，禁止连接后自动补完整段历史，并用补载前后的 `scrollHeight` 差保留可见位置。历史 ID 取 branch entry ID，完成消息的 `liveId` 用于迁移 Thinking 手动状态与计时。

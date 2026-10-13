@@ -19,7 +19,7 @@ pi-atom 系列的当前 TUI 会话 Web 扩展（命令 `/web` 与 `/web-wlan`）
 - **对齐与居中是硬要求**：新增图标、按钮、状态行、行号列时必须先确定垂直居中方式、水平对齐参照、背景是否需不透明，改完自己量一次（`getBoundingClientRect` + `getComputedStyle`），不要凭感觉。
 - **测试策略**（用户 2026-09-18 / 09-22 / 09-23 三次明确，2026-09-25 追问「每次都要跑测试吗」后收紧成最终档）：**测试文件一律不写、不改、不跑**——纯样式与视觉改动如此，协议、store 行为、组件交互逻辑、后端扩展等行为改动也如此；「行为变了要回头修既有用例」这条**取消**，测试文件由用户自己维护。改完只跑 `node scripts/check.mjs`（秒级的语法与重复声明门），其余交给用户 `/reload` 目检。行为改动若会让 `test/frontend.test.js` / `test/browser/web.spec.js` 变红，**只在汇报里点名是哪几条、为什么红、要改成什么**，不动手。临时诊断探针也写在工作区临时文件、用完即删，绝不进 `test/`。
 - **验证命令**：`npm run check`、`npm test`、独立 `npm run test:browser`（本机 npm 不在 PATH 时用 `node scripts/check.mjs`、`node scripts/test.mjs`、`node node_modules/@playwright/test/cli.js test`）。`check` 递归检查 `extensions/`、`shared/`、`web/` 下的 JS/TS 语法并拦截 CSS 的行首 `//`。禁止零测试假成功；测试不得调用真实模型或写真实会话。见 §23。
-- **文档同步**：改扩展后同步 `DETAILS.md`（细节）、`README.md`、`CHANGELOG.md`；涉及队列、UI 对话、自定义 Entry、package 适配、工具事件、历史窗口或派生状态接口时再加 `extensions/COMPATIBILITY-API.md`。文档一律中文。
+- **文档同步**：改扩展后同步 `DETAILS.md`（细节）、`README.md`、`CHANGELOG.md`；涉及**依赖、安装步骤、命令、端口或运行期文件**时再同步 `INSTALL.md`（面向 agent 的安装手册，`README.md` 顶部的一键安装 prompt 指向它）；涉及队列、UI 对话、自定义 Entry、package 适配、工具事件、历史窗口或派生状态接口时再加 `extensions/COMPATIBILITY-API.md`。文档一律中文。
 - **边界**：不创建独立的 agent、项目管理或会话管理系统，一律通过扩展 API 收发消息与订阅事件。
 - **package 专属内容只写适配目录**（用户 2026-09-26）：`web/components/**`、`web/stores/**`、`extensions/index.ts` 这类通用文件里**不得出现某个 package 的工具名 / customType / 专属字面量**。需要差异就先给通用代码加**通用钩子**（注册表 / 查表 / 可选字段），字面量写进 `extensions/packages/<pkg>/` 或 `web/packages/<pkg>/`；「做不到」只指通用侧确实无可挂点，不指加钩子麻烦。样板：`web/packages/tool-profiles.js` + 包目录 `tool-profile.js`（`{ tool, label, solo, summary(args), icon: { name, markup } }`）。CSS 例外按**形状**写（如 `:not(:has(.disclosure-block))`），不为 package 往通用组件塞自有 class。组件与本地 CSS 仍惰性，纯数据清单可静态登记。见 §21。
 - **提问一次问完**：同一主题的设计岔路（口径、分子/分母、实时值要不要、无数据时怎么显示）必须**合并成一轮** `ask_user_question`（最多 4 问）问完，不得拆成多轮追问。
@@ -37,7 +37,7 @@ pi-atom 系列的当前 TUI 会话 Web 扩展（命令 `/web` 与 `/web-wlan`）
 | 节 | 主题 | 什么时候读 |
 |---|---|---|
 | §0 | 术语表 | 沟通命名、文档措辞、把中文叫法对回代码标识时 |
-| §1 | 架构、目录与产物边界 | 新增目录或依赖、改 `web/` 入口、后端文件扩展名、`.agents/skills/` |
+| §1 | 架构、目录与产物边界 | 新增目录或依赖、改 `web/` 入口、后端文件扩展名、`.agents/skills/`、`node_modules` 静态资源挂载（`web/vendor/` 不存在）与 `INSTALL.md` |
 | §2 | 协议字段与 SSE 传输 | 加改快照与 patch 字段、历史窗口分页、重连看门狗、`/reload` 实例交接 |
 | §3 | 扩展入口、HTTP 服务与局域网模式 | 改 `/web*` 命令、静态资源白名单与 `resolveWebAsset`、`0.0.0.0` 绑定与网卡列表、固定端口网关与 `/<会话短码>/` 前缀、固定凭证与 `token.key`、工作区文件/Git RPC 与监听 |
 | §4 | 派生状态持久化与会话统计 | 写 `.pi/atom/<sessionId>/web-state.json`、轮数/Token/成本统计、生成速度 tok/s 口径、命令与 notify 镜像 |

@@ -1,5 +1,11 @@
 # pi-atom-web
 
+> **给 Agent 的一键安装**：把下面这句原样发给你的 agent，它会自己照着 [`INSTALL.md`](INSTALL.md) 把扩展和依赖装好：
+>
+> ```text
+> 阅读 https://raw.githubusercontent.com/WJBFks/pi-atom-web/main/INSTALL.md（本地已克隆就直接读仓库里的 INSTALL.md），按其中步骤为当前机器安装 pi-atom-web：克隆到 ~/.pi/agent/extensions/pi-atom-web、在该目录执行 npm ci 安装运行期依赖、用 npm run check 验证，然后在 pi 里执行 /reload 再 /web 打开界面；不要引入任何构建步骤，遇到覆盖已有目录、删除文件、改全局配置这类风险操作先问我。
+> ```
+
 ## 项目级 Codex Skills
 
 项目在 `.agents/skills/` 内提供 11 个 Codex 技能：`pi-vue-nobuild`、`pi-package-compatibility`、`frontend-design`、`vue-best-practices`、`pinia`、`vue-router-best-practices`、`node`、`web-design-guidelines`、`accessibility-compliance`、`responsive-design`、`interaction-design`。它们只作用于本项目；重新打开任务后由 Codex 自动发现。`pi-vue-nobuild` 固定浏览器原生 ESM、Vue 3、Pinia、Vue Router 与无前端构建步骤的架构；`pi-package-compatibility` 规定 Pi 第三方 package 的双端目录、按需激活、静默缺失、通用桥接和验证原则。
@@ -11,6 +17,8 @@ pi-atom 系列的独立产品：在运行中的 pi TUI 输入 `/web`，打开当
 页面统一使用字体栈：`Noto Sans Mono`、`JetBrains Mono`、`Fira Code`、`Consolas`、`ui-monospace`、`Microsoft YaHei`、`monospace`，按顺序回退。Noto Sans Mono 以本地可变 WOFF2 资源随扩展提供，不依赖系统字体或外部 CDN。
 
 ## 使用
+
+> 面向 agent 的完整安装手册（依赖为什么必须装、运行期文件落在哪、故障排查）见 [`INSTALL.md`](INSTALL.md)。
 
 要求：Node.js 22.18 或更高版本；支持 `ExtensionContext.mode`、消息事件及 `sendUserMessage` 的 pi 版本。
 
