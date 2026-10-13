@@ -1,6 +1,7 @@
 import { defineComponent, h } from "vue";
 import {
   buildToolContext,
+  messageId,
   toolResultId,
   useConversationStore,
 } from "../../stores/conversation.js";
@@ -8,6 +9,8 @@ import { useSessionStore } from "../../stores/session.js";
 import MessageItem from "./MessageItem.js";
 import ProcessingStatus, { lastBlockType } from "./ProcessingStatus.js";
 import ToolCallBlock, { toolLabel } from "./ToolCallBlock.js";
+import { renderTurnGroup } from "./TurnGroupView.js";
+import { buildTurnGroup, splitRunningTail } from "./turnGroups.js";
 import { useDialogsStore } from "../../stores/dialogs.js";
 
 export default defineComponent({
@@ -19,8 +22,24 @@ export default defineComponent({
     const dialogs = useDialogsStore();
     return () => {
       const live = conversation.liveMessage;
+      // **分流边界是「这一轮是否结束」**（用户 2026-09-25）：历史把还在进行的那一整轮摘出来
+      // 交给这里，于是正在生成的卡片就住在它所属那一轮的 `<details>` 里 —— 组怎么切（只以
+      // 「消息」划分）、级联折叠、轮次标题的计数全是同一份计算结果，不会再出现「live 区自己
+      // 临时多切一组」。这里只重算这一轮，已结束的轮仍由历史按 messages 渲染，
+      // 所以流式期间依旧不会重算整段 transcript（见 AGENTS.md 的性能红线）。
+      const tail = props.trace
+        ? []
+        : splitRunningTail(conversation.messages, {
+            running:
+              session.busy || Boolean(live) || conversation.tools.length > 0,
+            // 乐观用户消息已经代表新的一轮开始（只是还没进 messages）：这时不摘尾，
+            // 否则会把上一轮的尾巴错并进新轮；那条消息落库后自然对齐。
+            hasPendingUser: conversation.pendingUserMessages.length > 0,
+          }).tail;
+      const turnMessages = live ? [...tail, live] : tail;
+      // 工具上下文按整轮算：摘出来的那段里 toolCall 也要能与 toolResult 合成同一张卡。
       const tools = buildToolContext(
-        live ? [live] : [],
+        turnMessages,
         conversation.tools,
         conversation.toolTimings,
       );
@@ -40,21 +59,75 @@ export default defineComponent({
               onError: props.onError,
             }),
           );
-      if (
-        live &&
+      const liveKey = live ? live.id || "live" : null;
+      // 思考块的开合与耗时都按 `${消息id}-thinking-${块下标}` 记账，所以判断「是不是正在
+      // 流式那条」要比 id：整轮里被拆成「最终输出前置块」的那份是浅拷贝，引用比较会漏。
+      const isLive = (message) =>
+        Boolean(liveKey) && messageId(message) === liveKey;
+      // 执行轨迹视图不分流（整轮仍在历史里平铺），这里只渲染正在流式的那条消息。
+      const showTurn =
+        turnMessages.length > 0 &&
         (!props.trace ||
-          ["assistant", "toolResult", "bashExecution"].includes(live.role))
-      ) {
-        children.push(
+          Boolean(
+            live &&
+              ["assistant", "toolResult", "bashExecution"].includes(live.role),
+          ));
+      if (showTurn) {
+        const group = props.trace ? null : buildTurnGroup(turnMessages);
+        const renderUnit = (unit, key, _withStatus, extraClass) =>
           h(MessageItem, {
-            key: live.id || "live",
-            message: live,
-            live: true,
+            key,
+            message: unit.message,
+            live: isLive(unit.message),
             tools,
             token: props.token,
             onError: props.onError,
-          }),
-        );
+            // 中间过程组按「消息」切段后的块下标偏移（保住思考块的稳定身份）。
+            blockOffset: unit.offset || 0,
+            // 首/尾条目带 `turn-head`/`turn-tail`，否则时间轴引线会悬到下方
+            // 「正在思考…/正在等待模型响应…」状态行上。
+            class: extraClass || undefined,
+          });
+        if (group?.title) {
+          // 整轮渲染成一个轮次分组，blockKey 与它在历史里时同一个（折叠状态与级联水位线
+          // 因此连续，本轮结束移交回历史时不会跳一下）。本轮正在进行 → 保持展开。
+          children.push(
+            renderTurnGroup(group, {
+              keepOpen: true,
+              renderUnit,
+              // 与历史里的同一个组件，只是多一个标记供 CSS 补容器下方的间距。
+              turnProps: { class: "turn-live" },
+            }),
+          );
+          // 最终输出不属于折叠区。
+          if (group.finalMessage)
+            children.push(
+              h(MessageItem, {
+                key: `${messageId(group.finalMessage) ?? liveKey}:final`,
+                message: {
+                  ...group.finalMessage,
+                  content: group.finalBlocks,
+                },
+                live: isLive(group.finalMessage),
+                tools,
+                token: props.token,
+                onError: props.onError,
+              }),
+            );
+        } else {
+          // 这一轮还没有任何可计数的中间过程（比如只有一句正在输出的正文）：整轮平铺渲染。
+          for (const message of turnMessages)
+            children.push(
+              h(MessageItem, {
+                key: messageId(message) || liveKey,
+                message,
+                live: isLive(message),
+                tools,
+                token: props.token,
+                onError: props.onError,
+              }),
+            );
+        }
       }
       for (const running of conversation.tools) {
         const id = toolResultId(running);

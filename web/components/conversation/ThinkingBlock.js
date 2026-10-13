@@ -15,6 +15,7 @@ import {
 import { formatDuration } from "./ToolCallBlock.js";
 import MarkdownContent from "./MarkdownContent.js";
 import DisclosureBlock from "./DisclosureBlock.js";
+import { useCascade } from "./cascade.js";
 
 export default defineComponent({
   name: "ThinkingBlock",
@@ -29,10 +30,19 @@ export default defineComponent({
     const element = ref(),
       preview = ref();
     const compact = computed(() => props.text.replace(/\s+/g, " ").trim());
+    // 所有思考块默认折叠，**包括正在生成的那一个**（用户 2026-09-22 明确）：
+    // 折叠态已有单行摘要与耗时，要看全文自己点开；用户手动开合过则以其状态为准。
+    // 开始 / 完成都不再改变它的开合（用户 2026-09-24），唯一会替它收起的是祖先被手动折叠（级联）。
+    // `running` 只用于耗时计算与展开时的流式 Markdown。
+    const ancestors = useCascade();
     const open = computed(() =>
-      conversation.thinkingTouched.has(props.blockKey)
-        ? Boolean(conversation.thinkingOpen.get(props.blockKey))
-        : conversation.disclosure(props.blockKey, props.running),
+      conversation.openUnlessCollapsed(
+        props.blockKey,
+        conversation.thinkingTouched.has(props.blockKey)
+          ? Boolean(conversation.thinkingOpen.get(props.blockKey))
+          : conversation.disclosures.get(props.blockKey) === true,
+        ancestors,
+      ),
     );
     const timing = computed(() => conversation.thinkingTiming(props.blockKey));
     const dynamic = computed(

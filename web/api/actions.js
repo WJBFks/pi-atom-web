@@ -1,8 +1,9 @@
-import { validateAction } from "../../shared/protocol.js";
+import { validateAction } from "../shared/protocol.js";
+import { apiPath } from "./base.js";
 
 export async function postAction(token, action, fetchImpl = fetch, signal) {
   validateAction(action);
-  const response = await fetchImpl("/api/action", {
+  const response = await fetchImpl(apiPath("api/action"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

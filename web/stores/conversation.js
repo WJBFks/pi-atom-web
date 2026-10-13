@@ -214,6 +214,12 @@ export const useConversationStore = defineStore("conversation", {
     thinkingTouched: new Set(),
     thinkingTimes: new Map(),
     disclosures: new Map(),
+    // 级联折叠（用户 2026-09-24）：`disclosureSeq` 记每条开合的序号，`collapsedSeq` 记父级被
+    // **手动折叠**时的序号。序号是全局递增的单一计数器（比 Date.now() 可靠：同一豪秒内的
+    // 先后顺序不会丢）。两者都只在内存里（不落盘）：刷新后一切回到默认（轮次 / 组 / 卡片全收起）。
+    disclosureSeq: new Map(),
+    collapsedSeq: new Map(),
+    seq: 0,
     revision: 0,
     // 更早的历史是否已经全部取回；加载时是否把已加载的中间过程全部折叠。
     historyComplete: false,
@@ -270,6 +276,10 @@ export const useConversationStore = defineStore("conversation", {
       this.toolTimings = snapshot.toolTimings || {};
       this.thinkingTimes = new Map(Object.entries(snapshot.thinkingTimings || {}));
       this.disclosures = new Map(Object.entries(snapshot.disclosures || {}));
+      // 级联折叠的序号不跳会话：重新拉快照时一并清掉。
+      this.disclosureSeq = new Map();
+      this.collapsedSeq = new Map();
+      this.seq = 0;
       this.historyTools = buildToolContext(
         this.messages,
         this.tools,
@@ -352,13 +362,34 @@ export const useConversationStore = defineStore("conversation", {
       this.setDisclosure(key, open);
     },
     setDisclosure(key, open) {
+      this.disclosureSeq.set(String(key), ++this.seq);
       this.disclosures.set(String(key), Boolean(open));
       this.persistUiState?.();
     },
-    disclosure(key, fallback = false) {
-      return this.disclosures.has(String(key))
-        ? Boolean(this.disclosures.get(String(key)))
-        : fallback;
+    /**
+     * 父级被用户手动折叠：它下面所有「最后一次开合早于此刻」的子级一律收起。
+     * 只在用户动作上调（程序同步 open 属性时不算），否则一次级联会把整片状态写脏。
+     */
+    markCollapsed(key) {
+      this.collapsedSeq.set(String(key), ++this.seq);
+    },
+    /** 级联判定：自身为开、且没有任何祖先在这条记录之后被手动折叠过。 */
+    openUnlessCollapsed(key, own, ancestors = []) {
+      if (!own) return false;
+      const ownSeq = this.disclosureSeq.get(String(key)) || 0;
+      for (const ancestor of ancestors || [])
+        if ((this.collapsedSeq.get(String(ancestor)) || 0) > ownSeq)
+          return false;
+      return true;
+    },
+    disclosure(key, fallback = false, ancestors = []) {
+      return this.openUnlessCollapsed(
+        key,
+        this.disclosures.has(String(key))
+          ? Boolean(this.disclosures.get(String(key)))
+          : Boolean(fallback),
+        ancestors,
+      );
     },
     // 客户端当前最老一条的 id，作为 more_history 的游标。
     oldestMessageId() {
@@ -400,7 +431,9 @@ export const useConversationStore = defineStore("conversation", {
       );
     },
     finalizeThinking(keys, now = Date.now()) {
-      // 本地结算仅用于展示连续（停止计时），落盘由后端 thinkingTracker 负责。
+      // 本地结算只是让显示连续（停止走动），落盘由后端 thinkingTracker 负责。
+      // `startThinking` 已经没有人调用（startedAt 一律来自后端），保留 finish*
+      // 是因为 applySnapshot/applyPatch 用它冻结仍在走动的条目。
       for (const key of keys) {
         const timing = this.thinkingTimes.get(key);
         if (!timing || timing.durationMs != null) continue;

@@ -71,5 +71,17 @@ export function createThinkingTracker() {
     live.clear();
   }
 
-  return { track, settle, finish, reset };
+  /**
+   * 当前流式消息的实时状态（`index -> { startedAt, durationMs? }`）。
+   * 没有 durationMs 的条目就是「还在想」：后端把它随 `liveMessage` 一起发布，
+   * 浏览器才能对正在生成的思考块实时计时（之前流式期间没有任何数据，
+   * 耗时只能显示 `--`）。这些条目不落盘（session-state 只收有 durationMs 的）。
+   */
+  function streaming() {
+    const out = {};
+    for (const [index, timing] of live) out[index] = { ...timing };
+    return out;
+  }
+
+  return { track, settle, finish, reset, streaming };
 }

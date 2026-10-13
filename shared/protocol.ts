@@ -123,6 +123,22 @@ function message(value, name = "message") {
       fail(`${name}.tokensBefore 无效`);
     // 压缩条目上的完成行（`压缩完成（耗时…）`，由服务端从命令记录移过来）
     if ("compaction" in item) compactionField(item.compaction, name);
+    // 自动压缩的耗时（毫秒）：没有完成行时渲染成折叠块标题右侧的耗时。
+    if (
+      "compactionDurationMs" in item &&
+      (!Number.isFinite(item.compactionDurationMs) || item.compactionDurationMs < 0)
+    )
+      fail(`${name}.compactionDurationMs 无效`);
+    // 触发原因（宿主 `session_compact` 的 reason）：落盘的 CompactionEntry 本身没有这个字段，
+    // 所以由扩展按条目 id 记在 web-state.json 里。前端据此分流：**手动压缩是页面边界**
+    //（不进轮次分组），自动压缩算本轮的一步。缺失时保持旧行为（归进分组）。
+    if (
+      "compactionReason" in item &&
+      item.compactionReason !== "manual" &&
+      item.compactionReason !== "threshold" &&
+      item.compactionReason !== "overflow"
+    )
+      fail(`${name}.compactionReason 无效`);
     return;
   }
   content(item.content);
@@ -143,6 +159,10 @@ function message(value, name = "message") {
       if (branch[key] !== null && typeof branch[key] !== "string")
         fail(`${name}.branch.${key} 无效`);
   }
+  // 送达方式：目前只有引导队列的 "steer"（宿主不在 entry 上留标记，
+  // 由 Prompt 队列观察推定）；前端在用户消息状态行显示「时间 · 引导」。
+  if ("delivery" in item && item.delivery !== "steer")
+    fail(`${name}.delivery 无效`);
   // 压缩执行状态：运行中只有 startedAt（挂在命令记录上），
   // 完成后带 endedAt（挂在命令记录或压缩条目上）。
   if ("compaction" in item) compactionField(item.compaction, name);
@@ -194,8 +214,14 @@ function timings(value, name) {
   for (const [id, timing] of Object.entries(items)) {
     string(id, `${name}.id`, { max: 1024 });
     const item = object(timing, `${name}.${id}`);
-    if (!Number.isFinite(item.startedAt) || !Number.isFinite(item.durationMs) || item.durationMs < 0)
-      fail(`${name}.${id} 无效`);
+    if (!Number.isFinite(item.startedAt)) fail(`${name}.${id}.startedAt 无效`);
+    // durationMs 缺席 = 仍在进行（流式中的思考块要先给前端实时计时，
+    // 结算值随后端落盘覆盖）；给了就必须是非负有限数。
+    if (
+      "durationMs" in item &&
+      (!Number.isFinite(item.durationMs) || item.durationMs < 0)
+    )
+      fail(`${name}.${id}.durationMs 无效`);
     if ("endedAt" in item && !Number.isFinite(item.endedAt)) fail(`${name}.${id}.endedAt 无效`);
   }
 }
@@ -341,6 +367,39 @@ export function validateAction(value) {
       keysOnly(action, ["type", "sessionId", "entryId"], "navigate_branch");
       string(action.entryId, "navigate_branch.entryId", { max: 1024 });
       break;
+    case "configure_web":
+      // 改 Web 设置（用户级配置 `~/.pi/atom/web/config.json`）：端口改完下一次 /web 或 /web-wlan
+      // 才生效；fixedToken（固定凭证）那么服务端会当场换凭证；autoServe（重启后自动恢复）
+      // 只影响下次启动。三个字段都可省略，但至少给一个。
+      keysOnly(
+        action,
+        ["type", "sessionId", "port", "lanPort", "fixedToken", "autoServe"],
+        "configure_web",
+      );
+      for (const field of ["port", "lanPort"])
+        if (
+          field in action &&
+          (!Number.isInteger(action[field]) ||
+            action[field] < 1 ||
+            action[field] > 65535)
+        )
+          fail(`configure_web.${field} 无效`);
+      if ("fixedToken" in action && typeof action.fixedToken !== "boolean")
+        fail("configure_web.fixedToken 无效");
+      if ("autoServe" in action && typeof action.autoServe !== "boolean")
+        fail("configure_web.autoServe 无效");
+      if (
+        !("port" in action) &&
+        !("lanPort" in action) &&
+        !("fixedToken" in action) &&
+        !("autoServe" in action)
+      )
+        fail("configure_web 缺少字段");
+      break;
+    case "rotate_web_key":
+      // 换固定凭证用的本机密钥：所有会话的固定凭证一起换代（凭证泄露时的自救）。
+      keysOnly(action, ["type", "sessionId"], "rotate_web_key");
+      break;
     default:
       fail("action type 无效");
   }
@@ -352,6 +411,48 @@ function validateField(key, value) {
     case "instanceId":
       string(value, key, { max: 512 });
       break;
+    case "extensionVersion":
+      // 扩展自身版本（「设置 → 关于」展示）：读不到 package.json 时下发空串。
+      string(value, key, { empty: true, max: 64 });
+      break;
+    case "webConfig": {
+      // Web 设置：port/lanPort/fixedToken 是用户级配置值，gateway 是本会话已登记的入口（未开 Web 时 null），
+      // tokenKeyPath 是固定凭证用的本机密钥路径（删掉它就整体换代）。
+      if (value === null) break;
+      const config = object(value, key);
+      keysOnly(
+        config,
+        ["port", "lanPort", "fixedToken", "autoServe", "tokenKeyPath", "gateway"],
+        key,
+      );
+      for (const field of ["port", "lanPort"])
+        if (
+          !Number.isInteger(config[field]) ||
+          config[field] < 1 ||
+          config[field] > 65535
+        )
+          fail(`${key}.${field} 无效`);
+      if (typeof config.fixedToken !== "boolean")
+        fail(`${key}.fixedToken 无效`);
+      // autoServe（重启 pi 后自动把 Web 接回来）也是布尔值：缺了就整个 patch 会被丢，
+      // 所以服务端与协议两边同时上。
+      if (typeof config.autoServe !== "boolean")
+        fail(`${key}.autoServe 无效`);
+      string(config.tokenKeyPath, `${key}.tokenKeyPath`, { max: 512 });
+      if (config.gateway !== null) {
+        const route = object(config.gateway, `${key}.gateway`);
+        keysOnly(route, ["id", "port", "lan"], `${key}.gateway`);
+        string(route.id, `${key}.gateway.id`, { max: 16 });
+        if (
+          !Number.isInteger(route.port) ||
+          route.port < 1 ||
+          route.port > 65535
+        )
+          fail(`${key}.gateway.port 无效`);
+        if (typeof route.lan !== "boolean") fail(`${key}.gateway.lan 无效`);
+      }
+      break;
+    }
     case "name":
     case "cwd":
     case "model":
@@ -369,6 +470,22 @@ function validateField(key, value) {
     case "processingStartedAt":
       if (value !== null && (!Number.isFinite(value) || value < 0))
         fail(`${key} 无效`);
+      break;
+    // 正在生成这条消息的实时观测：`{ startedAt, elapsedMs, estimatedTokens }`。
+    // 只含正文与思考的生成过程（见 extensions/generation-timings.ts），
+    // 状态栏的 tok/s 在流式期间读它；没正文/思考时为 null。
+    case "liveGeneration":
+      if (value !== null) {
+        const generation = object(value, key);
+        if (!Number.isFinite(generation.startedAt) || generation.startedAt < 0)
+          fail(`${key}.startedAt 无效`);
+        for (const field of ["elapsedMs", "estimatedTokens"])
+          if (
+            !Number.isFinite(generation[field]) ||
+            generation[field] < 0
+          )
+            fail(`${key}.${field} 无效`);
+      }
       break;
     // 每轮的已结算时长：key = 该轮最终输出那条消息的客户端 id，
     // value = { startedAt, durationMs }。前端在每一轮输出下方显示「已完成（时长）」。
@@ -511,6 +628,32 @@ function validateField(key, value) {
       for (const p of def.packages) string(p, `${key}.packages 项`);
       if (typeof def.projectTrusted !== "boolean")
         fail(`${key}.definition.projectTrusted 无效`);
+      break;
+    }
+    case "contextUsage": {
+      // 上下文占用（输入框旁的占比圆环与弹层）：tokens / percent 允许 null
+      // （刚压缩完、还没有新的 LLM 用量时未知），contextWindow 必须是有界正数。
+      if (value !== null) {
+        const usage = object(value, key);
+        if (
+          usage.tokens !== null &&
+          (!Number.isFinite(usage.tokens) || usage.tokens < 0)
+        )
+          fail(`${key}.tokens 无效`);
+        if (
+          !Number.isFinite(usage.contextWindow) ||
+          usage.contextWindow <= 0 ||
+          usage.contextWindow > 1e9
+        )
+          fail(`${key}.contextWindow 无效`);
+        if (
+          usage.percent !== null &&
+          (!Number.isFinite(usage.percent) ||
+            usage.percent < 0 ||
+            usage.percent > 100)
+        )
+          fail(`${key}.percent 无效`);
+      }
       break;
     }
     default:

@@ -107,6 +107,25 @@ test("protocol accepts Web-only disclosure state and server-owned thinking timin
   assert.throws(() =>
     validateAction({ ...action, thinkingTimings: { thought: { startedAt: 10, durationMs: 20 } } }),
   );
+  // 进行中的思考块只有 startedAt、没有 durationMs（流式实时计时），必须能通过校验；
+  // 缺 startedAt 或负数 durationMs 仍然拒绝。
+  const running = { thought: { startedAt: 10 } };
+  assert.equal(
+    validateSnapshot({ ...snapshot, thinkingTimings: running }).thinkingTimings,
+    running,
+  );
+  assert.throws(() =>
+    validateSnapshot({
+      ...snapshot,
+      thinkingTimings: { thought: { startedAt: 10, durationMs: -1 } },
+    }),
+  );
+  assert.throws(() =>
+    validateSnapshot({
+      ...snapshot,
+      thinkingTimings: { thought: { durationMs: 5 } },
+    }),
+  );
   const thinkingTimings = { thought: { startedAt: 10, durationMs: 20 } };
   assert.equal(
     validateSnapshot({

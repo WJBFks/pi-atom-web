@@ -1,61 +1,36 @@
 import { defineComponent, h, shallowRef } from "vue";
-import { postAction } from "../../api/actions.js";
 import { icon } from "../../icons.js";
 import { useSessionStore } from "../../stores/session.js";
+import { usePromptQueueActions } from "../../stores/prompt-queue-actions.js";
 import { PreviewImage } from "../conversation/MessageItem.js";
-import { imagePayload, imageUrl, readImageFiles } from "./image-files.js";
+import { imageUrl, readImageFiles } from "./image-files.js";
 
 export default defineComponent({
   name: "PromptQueuePanel",
   props: { token: String, flash: Object, onError: Function },
   setup(props) {
     const session = useSessionStore();
-    const changing = shallowRef(null);
+    // 改类型与删除的提交抽到 `prompt-queue-actions`，与活动组件栏的队列长条共用一份实现
+    //（两边都只需知道“改哪一条 / 删哪一条”，revision 与报错处理只有一处）
+    const { changing, mutate: submit, remove: drop } = usePromptQueueActions(
+      props.token,
+      (error) => props.onError?.(error),
+    );
     const editing = shallowRef(null);
     const editDraft = shallowRef("");
     const editImages = shallowRef([]);
     const imageInput = shallowRef();
-    const request = (action) =>
-      postAction(props.token, { ...action, sessionId: session.sessionId });
 
     const mutate = async (item, kind, text = item.text, images = item.images || []) => {
-      if (changing.value) return false;
-      changing.value = item.id;
-      try {
-        await request({
-          type: "queue_update_item",
-          id: item.id,
-          revision: session.promptQueue.revision,
-          kind,
-          text,
-          images: imagePayload(images),
-        });
-        editing.value = null;
-        editDraft.value = "";
-        editImages.value = [];
-        return true;
-      } catch (error) {
-        props.onError?.(error);
-        return false;
-      } finally {
-        changing.value = null;
-      }
+      if (!(await submit(item, kind, text, images))) return false;
+      editing.value = null;
+      editDraft.value = "";
+      editImages.value = [];
+      return true;
     };
     const remove = async (item) => {
-      if (changing.value) return;
-      changing.value = item.id;
-      try {
-        await request({
-          type: "queue_remove",
-          id: item.id,
-          revision: session.promptQueue.revision,
-        });
-        if (editing.value === item.id) editing.value = null;
-      } catch (error) {
-        props.onError?.(error);
-      } finally {
-        changing.value = null;
-      }
+      if (!(await drop(item))) return;
+      if (editing.value === item.id) editing.value = null;
     };
     const beginEdit = (item) => {
       editing.value = item.id;

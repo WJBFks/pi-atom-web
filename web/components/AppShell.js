@@ -72,6 +72,11 @@ export default defineComponent({
     const dismiss = (event) => {
       const target = event.target;
       if (
+        composer.popover === "context" &&
+        !target.closest("#context-popover, #context-ring")
+      )
+        composer.popover = null;
+      if (
         composer.popover?.startsWith("status-") &&
         !target.closest(
           `#status-popover, [data-status="${composer.popover.slice(7)}"]`,
@@ -84,9 +89,16 @@ export default defineComponent({
       stream = undefined;
       clearTimeout(persistTimer);
     };
+    // 长期挂在后台的标签页：rAF 不跑、定时器被限频，休眠后连接还可能变成
+    // “既不报错也不来数据”的半开状态 → 不重连就会一直停在旧进度。
+    // 切回可见时让传输层 flush 并按需重连（见 `createEventStream().resume()`）。
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") stream?.resume();
+    };
     onMounted(() => {
       document.addEventListener("pointerdown", dismiss);
       window.addEventListener("pagehide", stop);
+      document.addEventListener("visibilitychange", onVisibility);
       if (!token) {
         session.connection = "failed";
         session.error =
@@ -117,6 +129,7 @@ export default defineComponent({
     onUnmounted(() => {
       stop();
       document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("pagehide", stop);
     });
     watch(

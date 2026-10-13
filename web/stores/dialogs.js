@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { stripInlineMarkdown } from "../markdown.js";
 
 /**
  * 活动组件的阻塞判定：某些活动组件（如扩展请求）会阻塞会话，
@@ -15,12 +16,15 @@ export function blockingActivities(requests) {
  * 活动的显示名：与活动栏 tab 上的名字保持一致
  * （package 定制名优先，如 ask_user_question → 「提问」）。
  * 用 `look` 注入，避免本模块反向依赖组件层的表。
+ *
+ * tab 标题现在允许 inline Markdown，但提示行是把名字包在行内代码桂里写的纯文本，
+ * 所以这里先摘成纯文本（否则「会话已被 `消息队列 \`3\`` 阻塞」这种嵌套反引号会泄到文案里）。
  */
 export function activityName(request, look) {
-  return (
+  return stripInlineMarkdown(
     look?.(request)?.label ||
-    request.title ||
-    `扩展请求 · ${request.kind}`
+      request.title ||
+      `扩展请求 · ${request.kind ?? ""}`.trim(),
   );
 }
 

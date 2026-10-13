@@ -287,7 +287,7 @@ export default defineComponent({
       draw();
       if (typeof ResizeObserver === "function") {
         observer = new ResizeObserver(onResize);
-        for (const element of [mainElement(), toolbarEl])
+        for (const element of [mainElement(), toolbarEl, scrollEl])
           if (element) observer.observe(element);
       }
       window.addEventListener("resize", onResize);

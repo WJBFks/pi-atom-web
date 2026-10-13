@@ -104,10 +104,39 @@ async function open(page, web) {
   page.on("pageerror", (error) => failures.push(error.message));
   await page.goto(new URL(`/#${token}`, web.server.url).toString());
   await expect(
-    page.locator("#message-history"),
+    // 守卫只看整个消息区：正在进行的整轮在 live 区、已结束的轮在历史区（按轮分流），
+    // 单独断言某一个容器会在会话忙时误报。
+    page.locator("#messages"),
     `页面错误：${failures.join("; ")}`,
   ).toContainText("历史消息");
   return failures;
+}
+
+/**
+ * 展开轮次分组与其内部的**中间过程组**（用户 2026-09-24 新增的一层折叠，默认收起）。
+ * 测试要点组内的卡片 / 要量组内几何时，得先把两级都打开。
+ */
+async function openFolds(page) {
+  await page.evaluate(() => {
+    for (const group of document.querySelectorAll(".turn-group")) {
+      if (group.tagName === "DETAILS") group.open = true;
+      for (const stage of group.querySelectorAll(".turn-stage")) stage.open = true;
+    }
+  });
+  await page.waitForTimeout(160);
+}
+
+// 中间过程组现在**一律默认折叠**（用户 2026-09-24：活跃的中间过程卡片不再特殊），
+// 所以 live 区里的卡片要操作或要断言可见，得先点开它所在的那一组。
+// 用真点击（而不是直接改 DOM）：状态走 store，后续补丁重渲染也不会被刷回去。
+async function openLiveStages(page) {
+  const stages = page.locator("#message-live .turn-stage");
+  const count = await stages.count();
+  for (let index = 0; index < count; index += 1) {
+    const stage = stages.nth(index);
+    if (await stage.evaluate((node) => node.open)) continue;
+    await stage.locator("> summary").click();
+  }
 }
 
 test("loads local ESM modules under CSP without page errors", async ({
@@ -201,6 +230,9 @@ test("long history keeps its nodes and does not steal scroll position during str
         role: "assistant",
         content: `历史记录 ${i}\n\n这是用于滚动验证的固定内容。`,
       })),
+      // 最后那条用户消息是正在回答的那一问：它之前的 200 条都属于已结束的轮，
+      // 留在历史容器里（没有这一条，整段历史会被当成「正在进行的那一轮」）。
+      { id: "long-question", role: "user", content: "开始流式验证" },
     ],
   });
   await open(page, web);
@@ -874,7 +906,13 @@ test("generic tools use JSON input and unframed Markdown output without nested v
   });
   await open(page, web);
   const tool = page.locator(".tool-block").filter({ hasText: /^ctx_execute/ });
-  await tool.evaluate((node) => { node.closest(".turn-group").open = true; node.open = true; });
+  await tool.evaluate((node) => {
+    // 中间过程组是轮次分组里新增的一层折叠，两级都展开才能看到卡片本体
+    const stage = node.closest(".turn-stage");
+    if (stage) stage.open = true;
+    node.closest(".turn-group").open = true;
+    node.open = true;
+  });
   await expect(tool.locator(".tool-panel")).toHaveCount(0);
   await expect(tool.locator(".tool-output-frame")).toHaveCount(0);
   await expect(tool.locator(".tool-io-section").first().locator(".code-header")).toContainText("json");
@@ -925,6 +963,9 @@ test("skill reads render as a normal grey card with the skill name", async ({
   await expect(skill.locator(".disclosure-separator")).toHaveText("·");
   await expect(skill.locator(".tool-title > span:last-child")).toHaveText("pi-vue-nobuild");
   await skill.evaluate((node) => {
+    // 工具卡在中间过程组里：组与轮次分组都要展开
+    const stage = node.closest(".turn-stage");
+    if (stage) stage.open = true;
     const group = node.closest(".turn-group");
     if (group) group.open = true;
   });
@@ -1060,7 +1101,7 @@ test("collapsible blocks keep grey normally and turn the whole summary red on er
   expect(errors).toEqual([]);
 });
 
-test("turn groups stay open after the turn ends and fold on the next user input", async ({
+test("轮次分组跟整个轮次走：标题计数、徒片样式与折叠时机", async ({
   page,
   web,
 }) => {
@@ -1100,11 +1141,23 @@ test("turn groups stay open after the turn ends and fold on the next user input"
   });
   const errors = await open(page, web);
   const group = page.locator(".turn-group");
-  await expect(group).toHaveCount(1);  await expect(group.locator(".turn-title")).toHaveText(
-    "2 次思考过程 · 1 次工具调用 · 1 条消息",
-  );
-  // 执行中默认展开：折叠区里的卡片可见
+  await expect(group).toHaveCount(1);
+  // 标题是「思考`2` · 工具调用`1` · 消息`1`」：类型名在前，数量是行内代码样式的徽片
+  await expect(group.locator("> summary .turn-title")).toHaveText("思考2·工具调用1·消息1");
+  const firstCount = group.locator(".turn-count").first();
+  await expect(firstCount).toHaveText("思考2");
+  await expect(firstCount.locator("code")).toHaveText("2");
+  // 徽片与行内代码同一套标记：有描边与面板底色
+  expect(
+    await firstCount.locator("code").evaluate((node) => {
+      const style = getComputedStyle(node);
+      return `${style.borderTopWidth} ${style.backgroundColor}`;
+    }),
+  ).not.toBe("0px transparent");
+  // 执行中：整轮（含已落定的中间过程）在同一个 `<details>` 里，且保持展开
   await expect(group).toHaveAttribute("open", "");
+  // 中间过程组是新一层的折叠（默认收起），要看组内的思考块得先把它打开
+  await openFolds(page);
   await expect(group.locator(".thinking-block").first()).toBeVisible();
   // 折叠区里的中间消息与最终输出同款排版（字号/行高一致）
   const sizes = await page.evaluate(() => {
@@ -1115,32 +1168,32 @@ test("turn groups stay open after the turn ends and fold on the next user input"
     const inner = [...document.querySelectorAll(".turn-group .disclosure-body > .message")].find(
       (message) => message.textContent.includes("中间说明"),
     );
-    const final = [...document.querySelectorAll("#message-history > .message")].find(
-      (message) => message.textContent.includes("最终答案"),
+    // 进行中的那一轮在 live 区、结束后回到历史区，所以两边一起查。
+    const finals = [
+      ...document.querySelectorAll(
+        "#message-history > .message, #message-live > .message",
+      ),
+    ];
+    const final = finals.find((message) =>
+      message.textContent.includes("最终答案"),
     );
     return { inner: read(inner), final: read(final) };
   });
   expect(sizes.inner).toEqual(sizes.final);
   // 最终输出留在折叠块之外
-  await expect(page.locator("#message-history > .message").last()).toContainText(
-    "最终答案",
-  );
-  // 流式消息结束、会话也不再工作时，仍然保持展开（折叠时机已改为下一个用户输入）
+  await expect(
+    page
+      .locator("#message-history > .message, #message-live > .message")
+      .last(),
+  ).toContainText("最终答案");
+  // 本轮一结束（busy 变假）立即自动折叠（不等下一个用户输入，用户 2026-09-24）。
+  // 此时整轮从 live 区移交回历史区，开合状态按同一个 blockKey 延续。
   web.publish({ liveMessage: null, tools: [], busy: true });
   await expect(group).toHaveAttribute("open", "");
   web.publish({ busy: false });
-  await expect(group).toHaveAttribute("open", "");
-
-  // 下一个用户输入开始 → 自动折叠
-  web.publish({
-    messages: [
-      ...turnMessages,
-      { id: "turn-u2", role: "user", content: "第二轮问题" },
-    ],
-  });
   await expect(group).not.toHaveAttribute("open", "");
 
-  // 用户手动展开过 → 再下一个用户输入也不再自动折叠
+  // 用户手动展开过 → 之后的下一个用户输入不再自动折叠
   await page.locator(".turn-group > summary").click();
   await expect(group).toHaveAttribute("open", "");
   web.publish({
@@ -1151,7 +1204,349 @@ test("turn groups stay open after the turn ends and fold on the next user input"
     ],
   });
   await expect(group).toHaveAttribute("open", "");
-  await expect(group.locator(".thinking-block").first()).toBeVisible();
+  // 组内卡片的开合（默认收起 / 级联）由「折叠跟随本轮进行状态」那条用例钉住，
+  // 这里只关心移交后轮次层级的状态仍然延续。
+  expect(errors).toEqual([]);
+});
+
+
+test("折叠跟随本轮进行状态，手动折叠会级联收起子级", async ({ page, web }) => {
+  const turn = [
+    { id: "cs-u1", role: "user", content: "跑一步" },
+    {
+      id: "cs-a1",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先看一眼" },
+        {
+          type: "toolCall",
+          id: "cs-c1",
+          name: "bash",
+          arguments: { command: "ls" },
+        },
+      ],
+    },
+    {
+      id: "cs-r1",
+      role: "toolResult",
+      toolCallId: "cs-c1",
+      toolName: "bash",
+      content: [{ type: "text", text: "a.ts" }],
+      isError: false,
+    },
+    { id: "cs-a2", role: "assistant", content: [{ type: "text", text: "这是最终输出" }] },
+  ];
+  // 进行中（busy）：轮次标题保持展开，组与卡片一律默认收起
+  web.setSnapshot({
+    busy: true,
+    messages: [...fixture().messages, ...turn],
+    tools: [],
+  });
+  const errors = await open(page, web);
+  const group = page.locator(".turn-group").last();
+  const stage = group.locator("> .disclosure-body > .turn-stage").first();
+  const card = stage.locator(".thinking-block").first();
+  await expect(group).toHaveAttribute("open", "");
+  await expect(stage).not.toHaveAttribute("open", "");
+  // 本轮结束：立即自动折叠，不需要等下一条用户输入
+  web.publish({ busy: false });
+  await expect(group).not.toHaveAttribute("open", "");
+
+  // 手动展开轮次标题 → 组 → 组内卡片
+  await group.locator("> summary").click();
+  await expect(group).toHaveAttribute("open", "");
+  await stage.locator("> summary").click();
+  await expect(stage).toHaveAttribute("open", "");
+  await card.locator("> summary").click();
+  await expect(card).toHaveAttribute("open", "");
+  // 手动折叠中间过程组 → 组内卡片一并收起
+  await stage.locator("> summary").click();
+  await expect(stage).not.toHaveAttribute("open", "");
+  await expect(card).not.toHaveAttribute("open", "");
+  // 组再展开：不恢复卡片此前的展开状态
+  await stage.locator("> summary").click();
+  await expect(stage).toHaveAttribute("open", "");
+  await expect(card).not.toHaveAttribute("open", "");
+  // 手动折叠轮次标题 → 其下组与卡片一并收起，再展开也不恢复
+  await card.locator("> summary").click();
+  await expect(card).toHaveAttribute("open", "");
+  await group.locator("> summary").click();
+  await expect(group).not.toHaveAttribute("open", "");
+  await expect(stage).not.toHaveAttribute("open", "");
+  await expect(card).not.toHaveAttribute("open", "");
+  await group.locator("> summary").click();
+  await expect(stage).not.toHaveAttribute("open", "");
+  await expect(card).not.toHaveAttribute("open", "");
+  expect(errors).toEqual([]);
+});
+
+test("正在生成的卡片住在它所属那一轮的 details 里（按轮分流防回归）", async ({
+  page,
+  web,
+}) => {
+  const turn = [
+    { id: "own-u1", role: "user", content: "跑一步" },
+    {
+      id: "own-a1",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先看一眼" },
+        { type: "toolCall", id: "own-c1", name: "bash", arguments: { command: "ls" } },
+      ],
+    },
+    {
+      id: "own-r1",
+      role: "toolResult",
+      toolCallId: "own-c1",
+      toolName: "bash",
+      content: [{ type: "text", text: "a.ts" }],
+      isError: false,
+    },
+  ];
+  // 本轮还在进行（已落定一段思考 + 工具调用，正在等工具结果）
+  web.setSnapshot({
+    busy: true,
+    messages: [...fixture().messages, ...turn],
+    tools: [],
+  });
+  const errors = await open(page, web);
+  // 整轮（连同已经落定的那一段）就在同一个轮次分组里，而且只有一个：
+  // 不会出现「历史一个框 + live 一个临时容器」两份 DOM。
+  const group = page.locator("#message-live .turn-live");
+  await expect(group).toHaveCount(1);
+  await expect(page.locator(".turn-group")).toHaveCount(1);
+  await expect(page.locator("#message-history .turn-group")).toHaveCount(0);
+  await expect(group.locator("> summary .turn-title")).toHaveText("思考1·工具调用1");
+  // 已经落定的工具卡也在这个 details 里（以前它留在历史框里，与 live 内容分居两处）
+  await expect(group.locator(".tool-block")).toHaveCount(1);
+  // 新的思考块开始流式：它直接长在这同一个 details 里，而且轮次标题的计数实时更新
+  web.publish({
+    liveMessage: {
+      id: "own-live",
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "接着想" }],
+    },
+  });
+  await expect(
+    group.locator('.thinking-block[data-key="own-live-thinking-0"]'),
+  ).toHaveCount(1);
+  await expect(group.locator("> summary .turn-title")).toHaveText("思考2·工具调用1");
+  // 本轮结束：整轮移交回历史区，仍然只有一个轮次分组（不会重出一份）
+  web.publish({
+    busy: false,
+    liveMessage: null,
+    messages: [
+      ...fixture().messages,
+      ...turn,
+      {
+        id: "own-a2",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "接着想" },
+          { type: "text", text: "这是最终输出" },
+        ],
+      },
+    ],
+  });
+  await expect(page.locator(".turn-group")).toHaveCount(1);
+  await expect(page.locator("#message-history .turn-group")).toHaveCount(1);
+  await expect(page.locator("#message-live .turn-group")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("intermediate blocks collapse into turn stages split by the messages in between", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    messages: [
+      ...fixture().messages,
+      { id: "st-u1", role: "user", content: "跑两步，中间给我说明" },
+      {
+        id: "st-a1",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先看一眼" },
+          { type: "toolCall", id: "st-c1", name: "bash", arguments: { command: "ls" } },
+        ],
+      },
+      { id: "st-r1", role: "toolResult", toolCallId: "st-c1", toolName: "bash", content: [{ type: "text", text: "a.ts" }], isError: false },
+      {
+        id: "st-a2",
+        role: "assistant",
+        content: [
+          { type: "text", text: "第一段中间说明" },
+          { type: "thinking", thinking: "再跑一步" },
+          { type: "toolCall", id: "st-c2", name: "bash", arguments: { command: "pwd" } },
+        ],
+      },
+      { id: "st-r2", role: "toolResult", toolCallId: "st-c2", toolName: "bash", content: [{ type: "text", text: "/tmp" }], isError: false },
+      { id: "st-a3", role: "assistant", content: [{ type: "text", text: "这是最终输出" }] },
+    ],
+    tools: [],
+  });
+  const errors = await open(page, web);
+  const group = page.locator(".turn-group").first();
+  await group.locator("> summary").click();
+  const top = group.locator("> .disclosure-body > *");
+  // 轮次分组正文：中间过程组 / 平铺的消息 / 中间过程组
+  await expect(top).toHaveCount(3);
+  await expect(top.nth(0)).toHaveClass(/turn-stage/);
+  await expect(top.nth(1)).toContainText("第一段中间说明");
+  await expect(top.nth(2)).toHaveClass(/turn-stage/);
+  // 轮次标题仍是全轮总数，组标题只算本组内容
+  await expect(group.locator("> summary .turn-title")).toHaveText("思考2·工具调用2·消息1");
+  await expect(top.nth(0).locator("> summary .turn-count")).toHaveText(["思考1", "工具调用1"]);
+  // 中间过程组默认收起，组内卡片不可见
+  await expect(top.nth(0)).not.toHaveAttribute("open", "");
+  await expect(top.nth(0).locator(".tool-block").first()).not.toBeVisible();
+  // 切片的块下标不得重排：思考块身份仍是 `${消息id}-thinking-${原始下标}`，
+  // 否则思考耗时与开合状态会全部错位（第二组的思考块原本是第 2 个块）。
+  await top.nth(0).locator("> summary").click();
+  await expect(top.nth(0)).toHaveAttribute("open", "");
+  await expect(top.nth(0).locator(".thinking-block")).toHaveAttribute("data-key", "st-a1-thinking-0");
+  await top.nth(2).locator("> summary").click();
+  await expect(top.nth(2).locator(".thinking-block")).toHaveAttribute("data-key", "st-a2-thinking-1");
+  // 时间轴只存在于展开的组内部（用户 2026-09-24）：顶层的组标题行与「消息」左侧干净，
+  // 组内卡片的圆点仍然画在吸顶的 summary 上。
+  const marks = await page.evaluate(() => {
+    const none = (node, pseudo) => getComputedStyle(node, pseudo).content === "none";
+    const stageTitle = document.querySelector(
+      ".turn-group>.disclosure-body>.turn-stage>summary",
+    );
+    const message = document.querySelector(".turn-group>.disclosure-body>.message");
+    const card = document.querySelector(".turn-stage .thinking-block>summary");
+    const answer = [...document.querySelectorAll("#message-history>.message")].find((node) =>
+      node.textContent.includes("这是最终输出"),
+    );
+    const type = (node) => {
+      const style = getComputedStyle(node.querySelector(".markdown") ?? node);
+      return `${style.fontSize}/${style.lineHeight}`;
+    };
+    const colorOf = (node) =>
+      getComputedStyle(node.querySelector(".markdown") ?? node).color;
+    const left = (node) => Math.round(node.getBoundingClientRect().left);
+    return {
+      topClean:
+        none(stageTitle, "::before") &&
+        none(stageTitle, "::after") &&
+        none(message, "::before") &&
+        none(message, "::after"),
+      innerDot: none(card, "::before") === false,
+      messageLeft: left(message),
+      answerLeft: left(answer),
+      stageLeft: left(stageTitle),
+      messageType: type(message),
+      answerType: type(answer),
+      messageColor: colorOf(message),
+      answerColor: colorOf(answer),
+    };
+  });
+  expect(marks.topClean).toBe(true);
+  expect(marks.innerDot).toBe(true);
+  // 「消息」与最终输出同款：左缘齐平（组标题也一样顶格），字号/行高逐项相等
+  expect(marks.messageLeft).toBe(marks.answerLeft);
+  expect(marks.stageLeft).toBe(marks.answerLeft);
+  expect(marks.messageType).toBe(marks.answerType);
+  // 但「中间消息」默认是中性黑灰（用户 2026-09-25：不要带蓝调的 --muted），最终输出仍是正文色
+  expect(marks.messageColor).toBe("rgb(89, 89, 89)");
+  expect(marks.answerColor).toBe("rgb(38, 55, 71)");
+  // 最终输出不进任何折叠块
+  await expect(page.locator("#message-history > .message").last()).toContainText("这是最终输出");
+  expect(errors).toEqual([]);
+});
+
+test("a compaction is one step of the turn instead of a cut between two turns", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    messages: [
+      ...fixture().messages,
+      { id: "cmp-u1", role: "user", content: "继续查" },
+      {
+        id: "cmp-a1",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先看常量" },
+          { type: "toolCall", id: "call-cmp", name: "bash", arguments: { command: "ls" } },
+        ],
+      },
+      {
+        id: "cmp-r1",
+        role: "toolResult",
+        toolCallId: "call-cmp",
+        content: [{ type: "text", text: "4096" }],
+        isError: false,
+      },
+      // 自动压缩：没有 /compact 命令记录，只有 branch 里的压缩条目
+      {
+        id: "cmp-c1",
+        role: "compactionSummary",
+        summary: "压缩后的信息",
+        tokensBefore: 200163,
+        compactionDurationMs: 34_000,
+      },
+      {
+        id: "cmp-a2",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "齐了" },
+          { type: "text", text: "结论如此" },
+        ],
+      },
+    ],
+  });
+  const errors = await open(page, web);
+  const group = page.locator("#message-history .turn-group");
+  // 压缩没把一个连续任务切成两轮
+  await expect(group).toHaveCount(1);
+  // 「压缩」计入标题，且排在最后
+  await expect(group.locator("> summary .turn-title")).toHaveText("思考2·工具调用1·压缩1");
+  await expect(group.locator("> summary .turn-count").last()).toHaveText("压缩1");
+  await group.locator("> summary").click();
+  await openFolds(page);
+  // 压缩块渲染在折叠块内部，并拿到属于自己的时间轴圆点与线段
+  const marks = await page.evaluate(() => {
+    const card = document.querySelector(".turn-group .compaction-message");
+    const dot = getComputedStyle(card.querySelector(".compaction-block > summary"), "::before");
+    const line = getComputedStyle(card, "::after");
+    return {
+      insideGroup: Boolean(card.closest(".turn-group")),
+      dotLeft: dot.left,
+      dotSize: dot.width,
+      lineLeft: line.left,
+      lineWidth: line.width,
+    };
+  });
+  // 摘要不能被轮次分组连带隐藏（分组自己也是 .disclosure-block，旧的
+  // `.disclosure-block[open] .disclosure-preview` 会把组内所有摘要一起吃掉）
+  const head = await page.evaluate(() => {
+    const block = document.querySelector(".turn-group .compaction-block");
+    const preview = block.querySelector(".disclosure-preview");
+    const collapsed = block.querySelector(".compaction-duration .duration-collapsed");
+    const expanded = block.querySelector(".compaction-duration .duration-expanded");
+    return {
+      previewText: preview.textContent,
+      previewHeight: Math.round(preview.getBoundingClientRect().height),
+      collapsedText: collapsed?.textContent ?? null,
+      collapsedVisible: collapsed ? collapsed.getBoundingClientRect().height > 0 : false,
+      expandedText: expanded?.textContent ?? null,
+      expandedVisible: expanded ? expanded.getBoundingClientRect().height > 0 : false,
+    };
+  });
+  expect(head.previewText).toBe("从200,163个token中压缩");
+  expect(head.previewHeight).toBeGreaterThan(0);
+  // 折叠到秒、展开到毫秒：与思考/工具同一格式
+  expect(head.collapsedText).toBe("34s");
+  expect(head.collapsedVisible).toBe(true);
+  expect(head.expandedText).toBe("34s 0ms");
+  expect(head.expandedVisible).toBe(false);
+  expect(marks.insideGroup).toBe(true);
+  expect(marks.dotSize).toBe("5px");
+  expect(marks.dotLeft).toBe("-12px");
+  expect(marks.lineWidth).toBe("1px");
+  expect(marks.lineLeft).toBe("-10px");
   expect(errors).toEqual([]);
 });
 
@@ -1189,7 +1584,7 @@ test("turning off auto collapse keeps middle steps open past the next user input
   await expect(group).toHaveAttribute("open", "");
 });
 
-test("a new thinking block folds the previous one, and the reply end folds the rest", async ({
+test("every thinking block starts collapsed, including the streaming one, and manual toggles win", async ({
   page,
   web,
 }) => {
@@ -1202,19 +1597,25 @@ test("a new thinking block folds the previous one, and the reply end folds the r
     liveMessage: { id: "multi-thinking", role: "assistant", content: [content[0]] },
   });
   await open(page, web);
+  await openLiveStages(page);
   const blocks = page.locator(".thinking-block");
   await expect(blocks).toHaveCount(1);
+  // 正在生成的思考块也默认折叠（要看全文自己点开；折叠行已有摘要与耗时）
+  await expect(blocks.nth(0)).not.toHaveAttribute("open", "");
+
+  // 用户手动展开后，后续新出现的思考块不得改动它的状态
+  await blocks.nth(0).locator("summary").click();
   await expect(blocks.nth(0)).toHaveAttribute("open", "");
 
-  // 第二个思考块开始 → 前一个立刻折叠，最后一个保持展开
+  // 第二个思考块开始 → 也默认折叠，不自动开合任何已有块
   web.publish({
     liveMessage: { id: "multi-thinking", role: "assistant", content },
   });
   await expect(blocks).toHaveCount(2);
-  await expect(blocks.nth(0)).not.toHaveAttribute("open", "");
-  await expect(blocks.nth(1)).toHaveAttribute("open", "");
+  await expect(blocks.nth(0)).toHaveAttribute("open", "");
+  await expect(blocks.nth(1)).not.toHaveAttribute("open", "");
 
-  // 全部回话结束（消息离开 live 区）→ 最后一个也折叠
+  // 整段回话结束（消息离开 live 区）：未动过的仍然折叠
   web.publish({
     liveMessage: null,
     messages: [
@@ -1227,8 +1628,80 @@ test("a new thinking block folds the previous one, and the reply end folds the r
       },
     ],
   });
-  await expect(blocks.nth(0)).not.toHaveAttribute("open", "");
   await expect(blocks.nth(1)).not.toHaveAttribute("open", "");
+});
+
+test("streaming middle steps join the live timeline box while the answer stays outside", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    liveMessage: {
+      id: "live-box",
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "正在想" }],
+    },
+  });
+  await open(page, web);
+  // 思考一出现就装进 live 区的容器（与历史同一个形态：顶层顶格、点线在展开的组内）
+  await expect(page.locator("#message-live .turn-live .thinking-block")).toHaveCount(1);
+
+  web.publish({
+    liveMessage: {
+      id: "live-box",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "正在想" },
+        { type: "text", text: "最终答案" },
+      ],
+    },
+  });
+  await expect(page.locator("#message-live .turn-live .thinking-block")).toHaveCount(1);
+  // 最终输出仍然在框外（与历史轮次一致）
+  await expect(page.locator("#message-live .turn-live")).not.toContainText("最终答案");
+  await expect(page.locator("#message-live")).toContainText("最终答案");
+  // 顶层一律不画线（用户 2026-09-24）：跨容器的桥接线段已随顶层去线删掉
+  expect(
+    await page
+      .locator("#message-live .turn-live>.disclosure-body")
+      .evaluate((node) => getComputedStyle(node, "::before").content),
+  ).toBe("none");
+  // 尾块不再向下引线（否则线段会悬在 live 状态行上方）
+  expect(
+    await page
+      .locator("#message-live .turn-live .thinking-block")
+      .evaluate((node) => getComputedStyle(node, "::after").display),
+  ).toBe("none");
+  // 圆点仍然画在吸顶的 summary 上
+  expect(
+    await page
+      .locator("#message-live .turn-live .thinking-block > summary")
+      .evaluate((node) => getComputedStyle(node, "::before").content),
+  ).not.toBe("none");
+});
+
+test("the streaming thinking block is timed by the server, not left at --", async ({
+  page,
+  web,
+}) => {
+  // 回归：浏览器只在「恰好抓到思考块还是最后一个块的某一帧」时才会本地起表；
+  // 标签页非活跃时补丁被合并，第一帧已经是 [thinking, text]，条目从未创建 → 显示 `--`。
+  // 现在后端把进行中的 timing（只有 startedAt）随 liveMessage 一起发布。
+  const startedAt = Date.now() - 4200;
+  web.setSnapshot({
+    liveMessage: {
+      id: "server-timed",
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "正在想" }],
+    },
+    thinkingTimings: { "server-timed-thinking-0": { startedAt } },
+  });
+  await open(page, web);
+  await openLiveStages(page);
+  const duration = page.locator(".thinking-block .thinking-duration");
+  await expect(duration).toBeVisible();
+  await expect(duration).not.toHaveText("--");
+  await expect(duration).toContainText("4s");
 });
 
 test("untouched Thinking collapses on completion and code blocks keep copyable source separate", async ({
@@ -1244,7 +1717,8 @@ test("untouched Thinking collapses on completion and code blocks keep copyable s
   });
   await open(page, web);
   await expect(page.locator(".thinking-block")).toHaveClass(/disclosure-block/);
-  await expect(page.locator(".thinking-block")).toHaveAttribute("open", "");
+  // 正在生成的思考块默认就是折叠态（不再是展开）
+  await expect(page.locator(".thinking-block")).not.toHaveAttribute("open", "");
   web.publish({
     liveMessage: null,
     messages: [
@@ -1271,6 +1745,14 @@ test("streaming updates preserve historical node identity and input focus", asyn
   page,
   web,
 }) => {
+  // 那一条历史消息属于已经结束的轮（后面跟着用户提问），所以它留在历史容器里；
+  // 否则按「轮是否结束」分流时，它会被当作正在进行的那一轮而整体交给 live 区。
+  web.setSnapshot({
+    messages: [
+      ...fixture().messages,
+      { id: "run-u1", role: "user", content: "开始提问" },
+    ],
+  });
   await open(page, web);
   await page.locator("#message-history").evaluate((node) => {
     window.__historyNode = node.firstElementChild;
@@ -1498,11 +1980,19 @@ test("user prompt status row offers copy, in-place edit and branch switching", a
   await expect(actions).toHaveCSS("opacity", "0");
   await message.hover();
   await expect(actions).toHaveCSS("opacity", "1");
-  // hover 时间：完整时间戳浮层
+  // hover 时间：完整时间戳浮层（传送至 body，见 hover-tip.js）
   await status.locator(".user-prompt-time").hover();
-  await expect(status.locator(".status-tip")).toHaveText(
+  const timeTip = page.locator("body > .status-tip");
+  await expect(timeTip).toHaveText(
     /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/,
   );
+  // 锁住锚向（现在由组件传给 PortalTip，不再是 CSS 子孙选择器）：浮层在时间下方、右缘对齐
+  const timeBox = await status.locator(".user-prompt-time").boundingBox();
+  const tipBox = await timeTip.boundingBox();
+  expect(tipBox.y).toBeGreaterThanOrEqual(timeBox.y + timeBox.height);
+  expect(Math.abs(tipBox.x + tipBox.width - (timeBox.x + timeBox.width))).toBeLessThanOrEqual(1);
+  // 防回归：正文内部不得再留住行浮层（会被三级吸顶标题压住 / 被折叠块 overflow:clip 裁掉）
+  await expect(page.locator("#messages .status-tip")).toHaveCount(0);
   // 复制提示词原文
   await status.locator(".user-prompt-action button").nth(1).click();
   await expect
@@ -1613,9 +2103,9 @@ test("turn badge copy survives a hanging clipboard API via the execCommand fallb
   await page.goto(new URL(`/#${token}`, web.server.url).toString());
   const badge = page.locator(".turn-status");
   await expect(badge).toHaveCount(1);
-  // hover 时间文字：下方弹出「开始/结束时间 + 总耗时」三行浮层
+  // hover 时间文字：浮层传送到 body 上（不被正文里的吸顶层压住），三行内容完整
   await badge.locator(".turn-status-time").hover();
-  await expect(badge.locator(".status-tip")).toHaveText(
+  await expect(page.locator("body > .status-tip")).toHaveText(
     /^开始时间：\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}结束时间：\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}总耗时：\d+/,
   );
   await badge.locator(".turn-status-copy button").click();
@@ -1724,8 +2214,13 @@ test("manual Thinking state remains open when the live turn completes", async ({
     },
   });
   await open(page, web);
+  await openLiveStages(page);
   const thinking = page.locator("#message-live .thinking-block");
   await expect(thinking).toBeVisible();
+  // 正在生成的思考块默认就是折叠态；用户手动展开后必须保留到整轮结束
+  await expect(thinking).not.toHaveAttribute("open", "");
+  await thinking.locator("summary").click();
+  await expect(thinking).toHaveAttribute("open", "");
   await thinking.locator("summary").click();
   await expect(thinking).not.toHaveAttribute("open", "");
   await thinking.locator("summary").click();
@@ -1973,23 +2468,20 @@ test("content column resizes from the edge handle, follows the pointer and is re
   await expect(page.locator(".column-resizer-zone").first()).toBeHidden();
 });
 
-test("top tabs switch between conversation, context and settings", async ({
+test("top tabs switch between conversation and settings", async ({
   page,
   web,
 }) => {
   await open(page, web);
   const tab = (id) => page.locator(`[data-view="${id}"]`);
-  await expect(page.locator('.view-tabs [role="tab"]')).toHaveCount(4);
+  // 轨迹与上下文页暂时隐藏（视图代码保留，待改为独立页面后接回）。
+  await expect(page.locator('.view-tabs [role="tab"]')).toHaveCount(2);
   await expect(tab("chat")).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#view-panel-feed")).toBeVisible();
-  await expect(page.locator("#view-panel-context")).toBeHidden();
+  await expect(tab("trace")).toHaveCount(0);
+  await expect(tab("context")).toHaveCount(0);
+  await expect(page.locator("#view-panel-context")).toHaveCount(0);
   await expect(page.locator("#view-panel-settings")).toBeHidden();
-
-  // 执行轨迹将改为独立页面：tab 保持可见但不可选中。
-  await expect(tab("trace")).toBeDisabled();
-  await tab("trace").click({ force: true });
-  await expect(tab("chat")).toHaveAttribute("aria-selected", "true");
-  await expect(page.locator("#view-panel-feed")).toBeVisible();
 
   await tab("settings").click();
   await expect(tab("settings")).toHaveAttribute("aria-selected", "true");
@@ -2016,20 +2508,20 @@ test("top tabs switch between conversation, context and settings", async ({
   await expect(page.locator("#settings-panel")).toContainText("未加载任何 Prompt 模板");
   await page.locator('[data-section="definition"]').click();
   await expect(page.locator("#settings-panel")).toContainText("未提供定义信息");
+  // 只有一个候选视图，因此不提供“打开页面时显示”选项。
+  await page.locator('[data-section="behaviour"]').click();
+  await expect(page.locator('[data-choice="context"]')).toHaveCount(0);
+  await expect(page.locator("#settings-panel")).not.toContainText("打开页面时显示");
 
-  await tab("context").click();
-  await expect(page.locator("#view-panel-context")).toContainText("上下文构成");
-  await expect(page.locator("#view-panel-context")).toContainText("Token 用量");
-
-  // 键盘：焦点跟着选中项移动（跳过不可选中的轨迹）。
+  // 键盘：只有对话与设置两个 tab，左右各切换一次并同步焦点。
   await tab("chat").click();
   await tab("chat").focus();
   await page.keyboard.press("ArrowRight");
-  await expect(tab("context")).toHaveAttribute("aria-selected", "true");
-  await expect(tab("context")).toBeFocused();
-  await page.keyboard.press("End");
   await expect(tab("settings")).toHaveAttribute("aria-selected", "true");
-  await tab("chat").click();
+  await expect(tab("settings")).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(tab("chat")).toHaveAttribute("aria-selected", "true");
+  await expect(tab("chat")).toBeFocused();
   await expect(page.locator("#message-history")).toContainText("历史消息");
 });
 
@@ -2250,14 +2742,21 @@ test("the settings tab controls theme, content width and behaviour, and remember
   await expect.poll(async () => (await stored()).autoCollapse).toBe(false);
   expect((await stored()).autoFollow).toBe(false);
 
-  // 默认视图：重新载入后落在上下文页，主题与开关保持
-  await panel.locator('[data-choice="context"]').click();
+  // 已暂特隐藏的视图（旧记忆里的「上下文」）在载入后回落到对话页，主题与开关保持
+  await page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem("atom-settings") || "{}");
+    localStorage.setItem(
+      "atom-settings",
+      JSON.stringify({ ...saved, defaultView: "context" }),
+    );
+  });
   await page.reload();
   await expect(page.locator("#message-history")).toContainText("历史消息");
-  await expect(page.locator('[data-view="context"]')).toHaveAttribute(
+  await expect(page.locator('[data-view="chat"]')).toHaveAttribute(
     "aria-selected",
     "true",
   );
+  await expect(page.locator('[data-view="context"]')).toHaveCount(0);
   await expect(page.locator("html")).toHaveClass(/dark/);
   // 安全区随刷新保持
   expect(await cssVar("--safe-area-bottom")).toBe("12px");
@@ -2268,7 +2767,7 @@ test("the settings tab controls theme, content width and behaviour, and remember
   ).toBe("12px");
 });
 
-test("context and settings pages hide the composer dock", async ({
+test("the settings page hides the composer dock", async ({
   page,
   web,
 }) => {
@@ -2292,9 +2791,6 @@ test("context and settings pages hide the composer dock", async ({
       .locator(".settings-page")
       .evaluate((node) => getComputedStyle(node).paddingBottom),
   ).toBe("20px");
-
-  await page.locator('[data-view="context"]').click();
-  await expect(dock).toBeHidden();
 
   await page.locator('[data-view="chat"]').click();
   await expect(dock).toBeVisible();
@@ -2516,28 +3012,19 @@ test("system tools render dedicated write content and edit diffs", async ({
       .filter({ hasText: new RegExp(`^${name}`) })
       .first();
 
-  // write：标题带路径，正文是推断出语言的高亮内容，原始入参收进二级折叠
-  const write = card("write");
-  await expect(write.locator(".tool-title")).toContainText("write");
+  // write：标题带路径，正文是推断出语言的高亮内容（专用视图早已去掉「原始 Input」与输出框）
+  const write = card("写入");
+  await expect(write.locator(".tool-title")).toContainText("写入");
   await expect(write.locator(".tool-title")).toContainText("src/demo.ts");
   await expect(write.locator(".code-header").first()).toContainText("typescript");
   await expect(write.locator(".code-source code").first()).toHaveText(
     "export const answer = 42;",
   );
-  await expect(write.locator("details.tool-raw-input")).toHaveCount(1);
-  await expect(write.locator("details.tool-raw-input")).not.toHaveAttribute(
-    "open",
-    "",
-  );
-  await expect(write.locator("details.tool-raw-input")).toContainText(
-    "原始 Input",
-  );
-  await expect(write.locator(".tool-output-frame")).toContainText(
-    "已写入 src/demo.ts",
-  );
+  await expect(write.locator("details.tool-raw-input")).toHaveCount(0);
+  await expect(write.locator(".tool-output-frame")).toHaveCount(0);
 
   // edit：结果带宿主算好的 diff 时按真实行号渲染
-  const edit = card("edit");
+  const edit = card("编辑");
   await expect(edit.locator(".tool-title")).toContainText("src/demo.ts");
   await expect(edit.locator(".diff-removed .diff-number")).toHaveText("2");
   await expect(edit.locator(".diff-added .diff-number")).toHaveText("2");
@@ -2547,11 +3034,19 @@ test("system tools render dedicated write content and edit diffs", async ({
   await expect(edit.locator(".diff-added .diff-text")).toHaveText(
     "export const answer = 43;",
   );
-  await expect(edit.locator("details.tool-raw-input")).toHaveCount(1);
+  // 行内（词级）高亮只圈住改动的那几个字，不是整行
+  await expect(
+    edit.locator(".diff-removed .diff-word", { hasText: /^42$/ }),
+  ).toHaveCount(1);
+  await expect(
+    edit.locator(".diff-added .diff-word", { hasText: /^43$/ }),
+  ).toHaveCount(1);
+  await expect(edit.locator("details.tool-raw-input")).toHaveCount(0);
 
   // diff 整块横向滚动，行号 gutter 固定（不能每行各自滚动）
   // 折叠状态下几何量全是 0，先展开中间过程与工具卡。
   await page.locator(".turn-group > summary").first().click();
+  await openFolds(page);
   await edit.locator("> summary").click();
   const block = edit.locator(".diff-block");
   const layout = await block.evaluate((node) => ({
@@ -2765,7 +3260,8 @@ test("edit falls back to argument hunks without line numbers until the result ar
   await open(page, web);
   const card = page
     .locator(".tool-block")
-    .filter({ hasText: /^edit/ })
+    // 标题已本地化成「编辑」（不是工具原名），过滤器得跟上
+    .filter({ hasText: /^编辑/ })
     .first();
   await expect(card.locator(".diff-removed .diff-text")).toHaveText(
     "const before = 1;",
@@ -2842,6 +3338,98 @@ test("activity bar shows one tab per extension request with package look", async
   expect(errors).toEqual([]);
 });
 
+test("the composer keeps a single button: send, stop, or send again once anything is typed", async ({
+  page,
+  web,
+}) => {
+  const png =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  web.setSnapshot({ busy: false });
+  await open(page, web);
+  const send = page.locator("#send");
+  const stop = page.locator("#stop");
+
+  // ① 空闲：只有提交按钮
+  await expect(send).toHaveCount(1);
+  await expect(stop).toHaveCount(0);
+
+  // ② 正在执行 + 输入为空：停止按钮**顶掉**提交按钮（不再是并排两个）
+  web.publish({ busy: true });
+  await expect(stop).toHaveCount(1);
+  await expect(send).toHaveCount(0);
+  // 两者共用同一套几何（32px 圆），换按钮看不出尺寸跳动
+  for (const css of [
+    ["width", "32px"],
+    ["height", "32px"],
+    ["border-radius", "50%"],
+  ]) {
+    await expect(stop).toHaveCSS(css[0], css[1]);
+  }
+
+  // ③ 正在执行但已输入文字：提交按钮回来（排队发送），停止按钮让位
+  await page.locator("#prompt").fill("排队的内容");
+  await expect(send).toHaveCount(1);
+  await expect(stop).toHaveCount(0);
+
+  // 文字清空又回到停止；只贴图（文本为空）也算「非空」，仍是提交按钮
+  await page.locator("#prompt").fill("");
+  await expect(stop).toHaveCount(1);
+  await page.evaluate((base64) => {
+    const bytes = Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], "pasted.png", { type: "image/png" }));
+    document
+      .querySelector("#prompt")
+      .dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: transfer,
+        }),
+      );
+  }, png);
+  await expect(page.locator(".image-attachment")).toHaveCount(1);
+  await expect(send).toHaveCount(1);
+  await expect(stop).toHaveCount(0);
+});
+
+test("clicking the tab that is already shown collapses the activity panel, clicking again reopens it", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({ requests: activityRequests() });
+  await open(page, web);
+  const panel = page.locator(".activity-panel:visible");
+  await expect(panel).toHaveCount(1);
+  // 不假设排序：`.activity-tab`（div）带 data-tone，可聚焦的是里面的 button
+  const activeId = await page
+    .locator(".activity-tab.is-active")
+    .getAttribute("data-tone");
+  const tab = page.locator(`[data-activity-tab="${activeId}"]`);
+
+  // 再点正在展示的那一项 → 折叠整栏（旧行为是「点了没反应」）
+  await tab.click();
+  await expect(panel).toHaveCount(0);
+  // 折叠后 tab 行落回输入卡上方，焦点仍留在被点的那一项上
+  await expect(tab).toBeFocused();
+
+  // 再点一次 → 重新展开到同一项
+  await tab.click();
+  await expect(panel).toHaveCount(1);
+  await expect(page.locator(".activity-tab.is-active")).toHaveAttribute(
+    "data-tone",
+    activeId,
+  );
+
+  // 点另一个 tab 仍然只是切换，不折叠
+  await page.locator(".activity-tab:not(.is-active) button").first().click();
+  await expect(panel).toHaveCount(1);
+  await expect(page.locator(".activity-tab.is-active")).not.toHaveAttribute(
+    "data-tone",
+    activeId,
+  );
+});
+
 test("prompt queue activity stacks guidance above queued messages and deletes one item", async ({
   page,
   web,
@@ -2886,8 +3474,9 @@ test("prompt queue activity stacks guidance above queued messages and deletes on
   await page.goto(new URL(`/#${token}`, web.server.url).toString());
   const tab = page.locator('[data-activity-tab="prompt-queue"]');
   await expect(tab).toContainText("消息队列 1");
-  await tab.click();
+  // 队列 tab 到达时自动展开；点已展开的那一项现在是「折叠」，所以这里只断言展开状态
   const panel = page.locator(".prompt-queue-panel");
+  await expect(panel).toBeVisible();
   await expect(panel).toContainText("已有后续任务");
   await expect(panel.locator(".prompt-queue-head")).toHaveCount(0);
   await expect(panel.locator(".prompt-queue-compose")).toHaveCount(0);
@@ -2960,7 +3549,9 @@ test("an image-only prompt is valid and appears directly in the busy follow-up q
   expect(web.actions[0]).toMatchObject({ type: "send", text: "", mode: "followUp" });
   expect(web.actions[0].images).toHaveLength(1);
   await expect(page.locator("#message-live .message.user")).toHaveCount(0);
-  await page.locator('[data-activity-tab="prompt-queue"]').click();
+  // 新增队列项会**自动展开**该 tab（现有规则：新增 / 编辑 / 跳队列转换都展开，并闪烁新增那条）。
+  // 这里不断言“未展开”：那既是旧规则，也与 patch 到达时机竞态。
+  await expect(page.locator(".prompt-queue-panel")).toBeVisible();
   await expect(
     page.locator('.prompt-queue-panel [data-queue-kind="followUp"] .image-preview-trigger'),
   ).toHaveCount(1);
@@ -2980,7 +3571,13 @@ test("new or changed queue items reopen the panel and flash the destination queu
   };
   web.setSnapshot({ busy: true, pending: true, promptQueue: queue });
   await page.goto(new URL(`/#${token}`, web.server.url).toString());
+  // 队列 tab 到达时已自动展开：点正在展示的那一项 = 折叠（新语义）
+  await expect(page.locator(".activity-panel:visible")).toHaveCount(1);
   await page.locator('[data-activity-tab="prompt-queue"]').click();
+  await expect(page.locator(".activity-panel:visible")).toHaveCount(0);
+  // 再点一次重新展开，然后确认行尾的最小化按钮同样是折叠入口
+  await page.locator('[data-activity-tab="prompt-queue"]').click();
+  await expect(page.locator(".activity-panel:visible")).toHaveCount(1);
   await page.getByRole("button", { name: "最小化" }).click();
   await expect(page.locator(".activity-panel:visible")).toHaveCount(0);
 
@@ -3043,8 +3640,8 @@ test("prompt queue activity edits queued text and moves it into steering", async
     return { previous, updated: queue.steering[0], queue };
   });
   await page.goto(new URL(`/#${token}`, web.server.url).toString());
-  await page.locator('[data-activity-tab="prompt-queue"]').click();
   const panel = page.locator(".prompt-queue-panel");
+  await expect(panel).toBeVisible();
 
   await panel.getByRole("button", { name: "编辑排队消息：原排队内容" }).click();
   const editor = panel.locator('textarea[aria-label="编辑排队消息"]');
@@ -3088,8 +3685,8 @@ test("prompt queue shows, previews and edits image-only items", async ({ page, w
     return { queue };
   });
   await page.goto(new URL(`/#${token}`, web.server.url).toString());
-  await page.locator('[data-activity-tab="prompt-queue"]').click();
   const panel = page.locator(".prompt-queue-panel");
+  await expect(panel).toBeVisible();
   await expect(panel.locator(".prompt-queue-images .image-preview-trigger")).toHaveCount(1);
   await panel.locator(".prompt-queue-images .image-preview-trigger").click();
   await expect(page.locator(".image-preview-overlay")).toBeVisible();
@@ -3131,6 +3728,68 @@ test("collapsing an activity panel keeps the in-progress form state", async ({
   await expect(page.locator('[data-ask-option="0"]')).toBeChecked();
   await expect(page.locator("[data-ask-text]")).toHaveValue("填到一半的答案");
   expect(errors).toEqual([]);
+});
+
+test("activity tab titles accept inline markdown and the queue count becomes a code chip", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    busy: true,
+    requests: [
+      {
+        id: "act-md",
+        sessionId: "session-browser",
+        kind: "select",
+        title: "**确认** 还是 `跳过`",
+        text: "请选择一项",
+        options: ["甲", "乙"],
+        blocking: false,
+      },
+    ],
+    promptQueue: {
+      revision: 1,
+      count: 3,
+      steering: [{ id: "steer:0:a", kind: "steer", index: 0, text: "甲" }],
+      followUp: [
+        { id: "followUp:0:b", kind: "followUp", index: 0, text: "乙" },
+        { id: "followUp:1:c", kind: "followUp", index: 1, text: "丙" },
+      ],
+    },
+  });
+  await open(page, web);
+
+  const queueTab = page.locator('.activity-tab[data-tone="prompt-queue"]');
+  const chip = queueTab.locator(".activity-tab-label code");
+  await expect(chip).toHaveCount(1);
+  await expect(chip).toHaveText("3");
+  // 文本内容没变：既有用例的 toContainText("消息队列 3") 仍然成立
+  await expect(queueTab.locator(".activity-tab-label")).toHaveText("消息队列 3");
+  // hover 浮层只能放纯文本，不能漏出反引号
+  await expect(queueTab.locator("button")).toHaveAttribute("title", "消息队列 3");
+
+  // 其它活动组件的标题同样吃 inline Markdown
+  const mdTab = page.locator('.activity-tab[data-tone="act-md"]');
+  await expect(mdTab.locator(".activity-tab-label strong")).toHaveText("确认");
+  await expect(mdTab.locator(".activity-tab-label code")).toHaveText("跳过");
+  await expect(mdTab.locator("button")).toHaveAttribute("title", "确认 还是 跳过");
+
+  // 徽片不许把 26px 的 tab 撑高，且要与 tab 垂直居中对齐
+  const geom = await queueTab
+    .locator("button")
+    .evaluate((button) => {
+      const code = button.querySelector("code").getBoundingClientRect();
+      const box = button.getBoundingClientRect();
+      return {
+        height: box.height,
+        delta: code.top + code.height / 2 - (box.top + box.height / 2),
+        codeBottom: code.bottom - box.bottom,
+      };
+    });
+  expect(Math.round(geom.height)).toBe(26);
+  expect(Math.abs(geom.delta)).toBeLessThanOrEqual(1.5);
+  // 不能溢出 tab 底边（贴输入卡上沿，溢出会压到分割线）
+  expect(geom.codeBottom).toBeLessThanOrEqual(0);
 });
 
 test("activity bar keyboard navigation moves focus between requests", async ({
@@ -3297,6 +3956,9 @@ test("folding block titles stick to the scroll top, nested ones cover the outer 
     ],
   });
   const errors = await open(page, web);
+  // 压缩块属于本轮的中间过程，加载时跟轮次一起折叠，先展开所在轮次再点它自己的标题。
+  await page.locator(".turn-group>summary").click();
+  await openFolds(page);
   await page.locator(".compaction-block>summary").click();
   const styles = await page.evaluate(() => {
     const at = (q) => {
@@ -3314,9 +3976,9 @@ test("folding block titles stick to the scroll top, nested ones cover the outer 
     expect(style.position).toBe("sticky");
     expect(style.background).toBe("rgb(255, 255, 255)");
   }
-  // 分组内部的折叠块同样吸顶：展开内层工具卡并滚进它的正文里，
-  // 内层标题贴住滚动容器顶部，并按绘制顺序盖住外层分组标题（同一位置只有一层标题）。
-  await page.locator(".turn-group>summary").click();
+  // 分组内部的折叠块同样吸顶，但**轮次分组展开时是两级堆叠**：分组标题钉在滚动容器顶部
+  // （z-index:20），内部卡片标题贴在它下方 `--turn-header-h`（30px）处，两者不再互相盖住。
+  // （轮次分组已在上面展开。）
   await page.locator(".turn-group .tool-block>summary").click();
   const nestedInside = await page.evaluate(() => {
     const scroll = document.querySelector("#scroll");
@@ -3333,18 +3995,34 @@ test("folding block titles stick to the scroll top, nested ones cover the outer 
     const scrollTop = scroll.getBoundingClientRect().top;
     const inner = document.querySelector(".turn-group .tool-block>summary");
     const innerRect = inner.getBoundingClientRect();
-    const hit = document.elementFromPoint(innerRect.left + 60, scrollTop + 4);
+    const group = document.querySelector(".turn-group>summary");
+    // 中间过程组入位后是三级吸顶：轮次标题 0 / 组标题 30 / 卡标 60。
+    const stage = document.querySelector(".turn-group .turn-stage>summary");
+    // 容器顶那一行了属于分组标题；中间那一行属于组标题；再下一行才是卡标。
+    const hitTop = document.elementFromPoint(innerRect.left + 60, scrollTop + 4);
+    const hitMiddle = document.elementFromPoint(
+      innerRect.left + 60,
+      scrollTop + 34,
+    );
+    const hitInnerRow = document.elementFromPoint(
+      innerRect.left + 60,
+      scrollTop + 64,
+    );
     return {
       innerRel: Math.round(innerRect.top - scrollTop),
-      groupRel: Math.round(
-        document.querySelector(".turn-group>summary").getBoundingClientRect().top - scrollTop,
-      ),
-      innermostOnTop: Boolean(hit && inner.contains(hit)),
+      groupRel: Math.round(group.getBoundingClientRect().top - scrollTop),
+      stageRel: Math.round(stage.getBoundingClientRect().top - scrollTop),
+      groupOnTopRow: Boolean(hitTop && group.contains(hitTop)),
+      stageOnMiddleRow: Boolean(hitMiddle && stage.contains(hitMiddle)),
+      innerOnOwnRow: Boolean(hitInnerRow && inner.contains(hitInnerRow)),
     };
   });
-  expect(nestedInside.innerRel).toBe(0);
   expect(nestedInside.groupRel).toBe(0);
-  expect(nestedInside.innermostOnTop).toBe(true);
+  expect(nestedInside.stageRel).toBe(30);
+  expect(nestedInside.innerRel).toBe(60);
+  expect(nestedInside.groupOnTopRow).toBe(true);
+  expect(nestedInside.stageOnMiddleRow).toBe(true);
+  expect(nestedInside.innerOnOwnRow).toBe(true);
   // 正文里的吸顶层也要在标题之下：代码块行号 gutter 是 `sticky; z-index:1`，
   // 与标题平级时它会（DOM 更靠后）盖住标题 —— 标题必须是它上面那一层。
   const overCodeGutter = await page.evaluate(() => {
@@ -3364,9 +4042,14 @@ test("folding block titles stick to the scroll top, nested ones cover the outer 
     const scrollTop = scroll.getBoundingClientRect().top;
     const gutter = code.querySelector(".code-lines").getBoundingClientRect();
     const hit = document.elementFromPoint(gutter.left + 8, scrollTop + 4);
-    return { topmost: hit ? `${hit.tagName}.${hit.className}` : null };
+    // 命中的必须是某一层的折叠标题（命中的具体节点可能是标题里的图标/数量徽片 span，
+    // 所以按「在 summary 内」判定，而不是比 tagName）。
+    return {
+      topmost: hit ? `${hit.tagName}.${hit.className}` : null,
+      onSummary: Boolean(hit?.closest?.("summary")),
+    };
   });
-  expect(overCodeGutter.topmost).toContain("SUMMARY");
+  expect(overCodeGutter.onSummary).toBe(true);
   // 滚进压缩块内部（20% / 60% 位置）：标题一直贴住滚动容器顶部。
   const inside = async (fraction) =>
     page.evaluate((fraction) => {
@@ -3393,10 +4076,56 @@ test("folding block titles stick to the scroll top, nested ones cover the outer 
         ),
       };
     }, fraction);
+  // 滚进压缩块内部（20% / 60% 位置）：它归进轮次分组里的**中间过程组**，所以跟组内其它
+  // 卡片一样走三级堆叠 —— 轮次标题占住顶行（0），组标题贴其下（30），压缩块标题再贴其下（60）。
   for (const fraction of [0.2, 0.6]) {
     const state = await inside(fraction);
     expect(state.coversTop, `压缩块应仍覆盖滚动容器顶部（${fraction}）`).toBe(true);
-    expect(state.rel).toBe(0);
+    expect(state.rel).toBe(60);
   }
+  expect(errors).toEqual([]);
+});
+
+// 上下文占比环（重构后补写）：环上的 aria-label 是唯一读数，未知（percent=null）不得当成 0%。
+// 弹层里的「压缩上下文」把 /compact 当成一次普通提交发出去（mode=followUp）。
+test("context ring shows the usage ratio and can trigger /compact", async ({
+  page,
+  web,
+}) => {
+  web.setSnapshot({
+    contextUsage: { tokens: 60000, contextWindow: 200000, percent: 30 },
+  });
+  const errors = await open(page, web);
+  const ring = page.locator("#context-ring");
+  await expect(ring).toHaveAttribute(
+    "aria-label",
+    "上下文占比 30.0%（60,000 / 200,000 token）",
+  );
+  await expect(ring).toHaveAttribute("data-level", "ok");
+  await expect(ring.locator(".context-ring-arc")).toHaveCount(1);
+  // 点环 → 弹层（与模型/思考级别选择器互斥，同一个 popover 槽位）
+  await ring.click();
+  const popover = page.locator("#context-popover");
+  await expect(popover).toContainText("上下文");
+  await expect(popover.locator("#context-compact")).toBeEnabled();
+  // 压缩就是排一次 /compact 提交，不另开一条通道
+  await popover.locator("#context-compact").click();
+  await expect
+    .poll(() => web.actions.filter((action) => action.type === "send").length)
+    .toBe(1);
+  expect(web.actions.find((action) => action.type === "send")).toMatchObject({
+    text: "/compact",
+    mode: "followUp",
+  });
+  // 本轮正在生成时不能再排一次压缩
+  web.publish({ busy: true });
+  await ring.click();
+  await expect(popover.locator("#context-compact")).toBeDisabled();
+  await ring.click();
+  // 刚压缩完还没有新用量：percent 为 null 是「未知」，不得画成 0% 的满圈或空读数
+  web.publish({ busy: false, contextUsage: { tokens: null, contextWindow: 200000, percent: null } });
+  await expect(ring).toHaveAttribute("aria-label", "上下文占比未知");
+  await expect(ring).toHaveAttribute("data-level", "unknown");
+  await expect(ring.locator(".context-ring-arc")).toHaveCount(0);
   expect(errors).toEqual([]);
 });

@@ -3,6 +3,7 @@ import { icon } from "../../icons.js";
 import { writeClipboard } from "../../clipboard.js";
 import { contentBlocks } from "../../stores/conversation.js";
 import { formatProcessingDuration, IconTipButton } from "./ProcessingStatus.js";
+import { useHoverTip } from "./hover-tip.js";
 
 const pad = (value) => String(value).padStart(2, "0");
 
@@ -12,7 +13,7 @@ export function formatClockTime(ms) {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-/** `2026/09/18 17:07:17` —— hover 浮层里的完整时间戳。 */
+/** `2026-09-18 17:07:17` —— hover 浮层里的完整时间戳。 */
 export function formatFullTime(ms) {
   const date = new Date(ms);
   return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
@@ -32,7 +33,7 @@ export function finalOutputText(message) {
 /**
  * 已完成轮次的状态徽标：`17:07（耗时2分钟48秒） [复制]`。
  * - 时间 = 完成时刻（turnProcessing 的 startedAt + durationMs）；
- * - hover 时间文字在**下方**弹出浮层：开始时间 / 结束时间 / 总耗时三行；
+ * - hover 时间文字弹三行浮层（开始时间 / 结束时间 / 总耗时，浮层由 `useHoverTip` 挂到 body）；
  * - 复制按钮把最终输出文本完整复制（反馈沿用惯例：图标短暂变对勾，不显示文字）。
  * 渲染在 `<article class="message">` 内、`.body` 之后（见 MessageItem 的 status 插槽）。
  */
@@ -46,16 +47,10 @@ export default defineComponent({
   setup(props) {
     const copied = ref(false);
     const failed = ref(false);
-    const open = ref(false);
-    let hideTimer, copyTimer, failTimer;
-    const show = () => {
-      clearTimeout(hideTimer);
-      open.value = true;
-    };
-    const hide = () => {
-      clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => (open.value = false), 120);
-    };
+    // 浮层一律走 PortalTip（见 hover-tip.js）：留在正文里会被三级吸顶标题压住、
+    // 被折叠块的 overflow:clip 裁掉。
+    const { anchor: timeEl, show, hide, tip } = useHoverTip();
+    let copyTimer, failTimer;
     const copy = async () => {
       const text = finalOutputText(props.message);
       if (text.trim() === "") return;
@@ -72,7 +67,6 @@ export default defineComponent({
       }
     };
     onUnmounted(() => {
-      clearTimeout(hideTimer);
       clearTimeout(copyTimer);
       clearTimeout(failTimer);
     });
@@ -86,21 +80,17 @@ export default defineComponent({
             "span",
             {
               class: "turn-status-time",
+              ref: timeEl,
               onMouseenter: show,
               onMouseleave: hide,
             },
             [
               `${formatClockTime(props.completedAt)}（耗时${formatProcessingDuration(props.durationMs)}）`,
-              open.value
-                ? h(
-                    "span",
-                    { class: "status-tip", "data-placement": "top", role: "tooltip" },
-                    [
-                    h("span", `开始时间：${formatFullTime(props.completedAt - props.durationMs)}`),
-                    h("span", `结束时间：${formatFullTime(props.completedAt)}`),
-                    h("span", `总耗时：${formatProcessingDuration(props.durationMs)}`),
-                  ])
-                : null,
+              tip([
+                h("span", `开始时间：${formatFullTime(props.completedAt - props.durationMs)}`),
+                h("span", `结束时间：${formatFullTime(props.completedAt)}`),
+                h("span", `总耗时：${formatProcessingDuration(props.durationMs)}`),
+              ]),
             ],
           ),
           hasText

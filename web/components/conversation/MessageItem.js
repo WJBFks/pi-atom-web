@@ -13,11 +13,12 @@ import { postAction } from "../../api/actions.js";
 import MarkdownContent from "./MarkdownContent.js";
 import CompactionStatus from "./CompactionStatus.js";
 import ThinkingBlock from "./ThinkingBlock.js";
-import ToolCallBlock from "./ToolCallBlock.js";
+import ToolCallBlock, { formatDuration } from "./ToolCallBlock.js";
 import TurnStatusBadge from "./TurnStatusBadge.js";
-import UserPromptStatus from "./UserPromptStatus.js";
+import UserPromptStatus, { promptText } from "./UserPromptStatus.js";
 import DisclosureBlock from "./DisclosureBlock.js";
 import CustomEntryBlock from "./CustomEntryBlock.js";
+import { useHoverTip } from "./hover-tip.js";
 import { writeClipboard } from "../../clipboard.js";
 
 export const PreviewImage = defineComponent({
@@ -115,18 +116,10 @@ export const CommandRule = defineComponent({
   },
   setup(props, { slots }) {
     const copied = ref(false);
-    const open = ref(false);
     const root = ref();
-    let hideTimer = null;
-    const show = () => {
-      clearTimeout(hideTimer);
-      open.value = true;
-    };
-    // 延迟一点再收起：鼠标从气泡移到弹层途中有间隙，立刻收起会闪
-    const hide = () => {
-      clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => (open.value = false), 120);
-    };
+    // 命令横线的 hover 浮层走 PortalTip（见 hover-tip.js）：行内浮层会被正文里的
+    // 吸顶标题压住（轮次标题 20 / 中间过程组 10）。
+    const { anchor, open, show, hide, tip } = useHoverTip();
     const source = () => props.full || props.code || props.label;
     const copy = async () => {
       try {
@@ -137,7 +130,6 @@ export const CommandRule = defineComponent({
         copied.value = false;
       }
     };
-    onUnmounted(() => clearTimeout(hideTimer));
     return () =>
       // 与其它顶层条目一样包在 `<article class="message">` 里：间距由
       // `#message-history>*` 的 8px 节奏提供，不再自己搞一套 10px 上下边距。
@@ -167,6 +159,7 @@ export const CommandRule = defineComponent({
                 "span",
                 {
                   class: "command-rule-info-wrap",
+                  ref: anchor,
                   onMouseenter: show,
                   onMouseleave: hide,
                   onFocusin: show,
@@ -185,14 +178,15 @@ export const CommandRule = defineComponent({
                     icon(copied.value ? "check" : "alert"),
                   ),
                   // 自定义浮层：两行 —— 第一行全文，第二行点击复制
-                  open.value
-                    ? h("span", { class: "command-rule-tip", role: "tooltip" }, [
-                        h("span", { class: "command-rule-tip-full" }, source()),
-                        // 第二行固定显示操作提示（复制反馈只体现在图标变对勾上，
-                        // 不再把文案换成「已复制」）
-                        h("span", { class: "command-rule-tip-hint" }, props.hint),
-                      ])
-                    : null,
+                  tip(
+                    [
+                      h("span", { class: "command-rule-tip-full" }, source()),
+                      // 第二行固定显示操作提示（复制反馈只体现在图标变对勾上，
+                      // 不再把文案换成「已复制」）
+                      h("span", { class: "command-rule-tip-hint" }, props.hint),
+                    ],
+                    { align: "center", class: "command-rule-tip" },
+                  ),
                 ],
               ),
             ]),
@@ -239,6 +233,12 @@ export default defineComponent({
     status: { type: Object, default: null },
     /** 连接凭证（用户状态行的编辑/分支切换动作要用）；缺省时这些动作不工作。 */
     token: { type: String, default: "" },
+    /**
+     * `message.content` 是原消息块数组的**切片**时，切片在原数组里的起始下标。
+     * 思考块的身份是 `${消息id}-thinking-${块下标}`（与服务端落盘的 thinkingTimings 同格式），
+     * 中间过程组按「消息」切段后必须带偏移，否则下标会重排、耗时与开合状态全部错位。
+     */
+    blockOffset: { type: Number, default: 0 },
     onError: { type: Function, default: null },
   },
   setup(props) {
@@ -373,12 +373,29 @@ export default defineComponent({
               icon: "box",
             },
             {
+              // 耗时：自动压缩（没有「压缩完成」完成行的那些）由后端给
+              // `compactionDurationMs`，形态与思考 / 工具调用完全一致：折叠到秒
+              // （不足一秒 `<1s`）、展开到毫秒，不提供 hover。
               summary: () => [
                 h("span", { class: "disclosure-summary-row" }, [
                   h("strong", "压缩"),
                   h("span", { class: "disclosure-separator" }, "·"),
                   h("span", { class: "disclosure-preview" }, preview),
                 ]),
+                Number.isFinite(message.compactionDurationMs)
+                  ? h("span", { class: "compaction-duration" }, [
+                      h(
+                        "span",
+                        { class: "duration-collapsed" },
+                        formatDuration(message.compactionDurationMs, false),
+                      ),
+                      h(
+                        "span",
+                        { class: "duration-expanded" },
+                        formatDuration(message.compactionDurationMs, true),
+                      ),
+                    ])
+                  : null,
               ],
               default: () => [h(MarkdownContent, { text: message.summary || "" })],
             },
@@ -496,6 +513,8 @@ export default defineComponent({
 
       const rawBlocks = contentBlocks(message.content);
       const thinkingLastIndex = lastThinkingIndex(message.content);
+      // 切片下标偏移：只用于稳定身份（思考块 / 无 id 的工具卡），不影响渲染内容。
+      const blockOffset = Number(props.blockOffset) || 0;
       const userImages =
         message.role === "user"
           ? rawBlocks.filter((block) => block.type === "image")
@@ -522,15 +541,15 @@ export default defineComponent({
                 return h(ThinkingBlock, {
                   key: index,
                   text: block.thinking,
-                  blockKey: `${key}-thinking-${index}`,
-                  // 只有最后一个思考块在仍生成时保持展开；下一个思考块一开始，
-                  // 前一个立刻折叠，整段回话结束时（消息离开 live 区）全部折叠。
+                  blockKey: `${key}-thinking-${index + blockOffset}`,
+                  // 所有思考块（含正在生成的）都默认折叠；`running` 只用于
+                  // 耗时结算与展开时的流式 Markdown，不再决定默认开合。
                   running: props.live && index === thinkingLastIndex,
                 });
               if (block.type === "toolCall") {
                 const id = toolCallId(block);
                 const toolKey =
-                  id == null ? `${key}-call-${index}` : String(id);
+                  id == null ? `${key}-call-${index + blockOffset}` : String(id);
                 return h(ToolCallBlock, {
                   key: toolKey,
                   call: block,
@@ -552,6 +571,53 @@ export default defineComponent({
       if (message.role === "user") {
         const editing = conversation.userEdit?.id === messageId(message);
         const imageNodes = userImages.map(renderImage);
+        // 引导（steer）消息也是本轮的一个步骤：同样用折叠块，与思考/工具卡一致。
+        // 折叠态只有一行「引导 · 用户输入的文本」（溢出省略号），展开态沿用原来的展示
+        // （右对齐气泡 + 下方状态行）。
+        const steering = message.delivery === "steer";
+        const content = editing
+          ? userEditor(message, imageNodes)
+          : [
+              imageNodes.length
+                ? h(
+                    "div",
+                    { class: "user-image-strip", "aria-label": "用户上传的图片" },
+                    imageNodes,
+                  )
+                : null,
+              blocks.length
+                ? h("div", { class: "body user-bubble" }, blocks)
+                : null,
+              userStatus(message),
+            ];
+        if (steering && !editing)
+          return h(
+            "article",
+            { class: ["message", "user", "user-steer"] },
+            h(
+              DisclosureBlock,
+              {
+                class: "steer-block",
+                blockKey: `steer-${key}`,
+                icon: "send",
+                "data-steer": "true",
+              },
+              {
+                summary: () =>
+                  h("span", { class: "disclosure-summary-row steer-title" }, [
+                    h("strong", "引导"),
+                    h("span", { class: "disclosure-separator" }, "·"),
+                    h(
+                      "span",
+                      { class: "disclosure-preview" },
+                      promptText(message).replace(/\s+/g, " ").trim() ||
+                        (userImages.length ? "图片" : ""),
+                    ),
+                  ]),
+                default: () => content,
+              },
+            ),
+          );
         return h(
           "article",
           {
@@ -562,23 +628,7 @@ export default defineComponent({
               editing && "is-editing",
             ],
           },
-          [
-            editing
-              ? userEditor(message, imageNodes)
-              : [
-                  imageNodes.length
-                    ? h(
-                        "div",
-                        { class: "user-image-strip", "aria-label": "用户上传的图片" },
-                        imageNodes,
-                      )
-                    : null,
-                  blocks.length
-                    ? h("div", { class: "body user-bubble" }, blocks)
-                    : null,
-                  userStatus(message),
-                ],
-          ],
+          content,
         );
       }
       return h(

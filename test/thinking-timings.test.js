@@ -80,3 +80,25 @@ test("reset 丢弃未结算状态", () => {
   tracker.reset();
   assert.deepEqual(tracker.finish(), {});
 });
+
+test("streaming() 暴露仍在进行的思考块（无 durationMs），供浏览器实时计时", async () => {
+  const tracker = createThinkingTracker();
+  const t0 = Date.now();
+  tracker.track({ content: [think()] });
+  const live = tracker.streaming();
+  assert.equal(Object.keys(live).length, 1, "流式期间应有一条进行中记录");
+  assert.equal(live[0].durationMs, undefined, "进行中不得带 durationMs");
+  assert.ok(live[0].startedAt >= t0 - 5 && live[0].startedAt <= Date.now());
+
+  // 结算后 streaming() 仍给出已结算值（同一消息未结束前可以继续展示）
+  tracker.track({ content: [think(), text()] });
+  tracker.settle({ content: [think(), text()] });
+  const settledLive = tracker.streaming();
+  assert.ok(Number.isFinite(settledLive[0].durationMs));
+
+  // finish 之后清空：下一条消息不会继承上一轮的思考状态
+  tracker.finish();
+  assert.deepEqual(tracker.streaming(), {});
+  tracker.track({ content: [think()] });
+  assert.ok(Date.now() - tracker.streaming()[0].startedAt < 2000);
+});

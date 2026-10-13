@@ -2,11 +2,11 @@ import {
   defineComponent,
   h,
   onUnmounted,
-  ref,
   shallowRef,
   watch,
 } from "vue";
 import { icon } from "../../icons.js";
+import { useHoverTip } from "./hover-tip.js";
 
 /**
  * 带 hover 文字浮层的图标按钮：按钮 + 自绘浮层（不用系统 `title`——样式不可控且有延迟）。
@@ -26,24 +26,21 @@ export const IconTipButton = defineComponent({
     disabled: Boolean,
   },
   setup(props, { slots, attrs }) {
-    const open = ref(false);
-    let tipTimer;
+    // 浮层走 PortalTip（见 hover-tip.js）：消息里的图标按钮嵌在折叠块内，行内浮层
+    // 会被三级吸顶标题压住、被 overflow:clip 裁掉。
+    const { anchor, show, hide, tip } = useHoverTip();
     // 继承来的 class（如 `.user-prompt-action`）显式给外壳：尺寸/圆角/透明度都作用在外壳上，
     // 按钮本体只保留 `.tip-button-control`，避免两类同时生效导致 padding/border 叠加或透明度翻倍。
     const { class: inheritedClass, ...buttonAttrs } = attrs;
-    const show = () => {
-      clearTimeout(tipTimer);
-      open.value = true;
-    };
-    const hide = () => {
-      clearTimeout(tipTimer);
-      tipTimer = setTimeout(() => (open.value = false), 120);
-    };
-    onUnmounted(() => clearTimeout(tipTimer));
     return () =>
       h(
         "span",
-        { class: ["tip-button", inheritedClass], onMouseenter: show, onMouseleave: hide },
+        {
+          class: ["tip-button", inheritedClass],
+          ref: anchor,
+          onMouseenter: show,
+          onMouseleave: hide,
+        },
         [
           h(
             "button",
@@ -56,17 +53,13 @@ export const IconTipButton = defineComponent({
             },
             slots.default ? slots.default() : icon(props.iconName),
           ),
-          open.value && !props.disabled
-            ? h(
-                "span",
-                {
-                  class: "status-tip tip-button-tip",
-                  "data-placement": props.placement,
-                  role: "tooltip",
-                },
-                props.label,
-              )
-            : null,
+          props.disabled
+            ? null
+            : tip(props.label, {
+                placement: props.placement,
+                align: "center",
+                class: "tip-button-tip",
+              }),
         ],
       );
   },
@@ -171,20 +164,18 @@ export default defineComponent({
   },
   setup(props) {
     const now = shallowRef(Date.now());
-    const tipOpen = ref(false);
-    let timer, tipTimer;
+    // 行尾的「开始时间」浮层同样走 PortalTip（见 hover-tip.js）。
+    const {
+      anchor,
+      show: showTip,
+      hide: hideTip,
+      tip,
+    } = useHoverTip();
+    let timer;
 
     const stop = () => {
       clearInterval(timer);
       timer = undefined;
-    };
-    const showTip = () => {
-      clearTimeout(tipTimer);
-      tipOpen.value = true;
-    };
-    const hideTip = () => {
-      clearTimeout(tipTimer);
-      tipTimer = setTimeout(() => (tipOpen.value = false), 120);
     };
     // 只有「在跑」才需要每秒 tick；否则（阻塞等静态状态）不需要计时器。
     const sync = () => {
@@ -200,10 +191,7 @@ export default defineComponent({
     };
 
     watch(() => [props.active, props.startedAt], sync, { immediate: true });
-    onUnmounted(() => {
-      stop();
-      clearTimeout(tipTimer);
-    });
+    onUnmounted(stop);
 
     return () => {
       if (!props.active) return null;
@@ -230,6 +218,7 @@ export default defineComponent({
           class: "processing-status",
           role: "status",
           "aria-live": "polite",
+          ref: anchor,
           onMouseenter: props.startedAt != null ? showTip : undefined,
           onMouseleave: props.startedAt != null ? hideTip : undefined,
         },
@@ -239,10 +228,8 @@ export default defineComponent({
           ),
           duration,
           // hover 浮层：只展示开始时间（完整时间戳）。
-          props.startedAt != null && tipOpen.value
-            ? h("span", { class: "status-tip", role: "tooltip" }, [
-                h("span", `开始时间：${formatFullTime(props.startedAt)}`),
-              ])
+          props.startedAt != null
+            ? tip([h("span", `开始时间：${formatFullTime(props.startedAt)}`)])
             : null,
         ],
       );

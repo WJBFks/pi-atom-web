@@ -1,8 +1,9 @@
-import { defineComponent, h, onUnmounted, ref } from "vue";
+import { defineComponent, h } from "vue";
 import ProcessingStatus, {
   formatFullTime,
   formatProcessingDuration,
 } from "./ProcessingStatus.js";
+import { useHoverTip } from "./hover-tip.js";
 
 /**
  * 压缩完成的单行文案：`压缩完成（耗时2分钟48秒）`（与助手侧徽标的耗时格式同一套）。
@@ -27,18 +28,8 @@ export default defineComponent({
   name: "CompactionStatus",
   props: { compaction: { type: Object, default: null } },
   setup(props) {
-    const open = ref(false);
-    let hideTimer;
-    // 延迟收起：鼠标从文字移到浮层途中有间隙，立刻收起会闪。
-    const show = () => {
-      clearTimeout(hideTimer);
-      open.value = true;
-    };
-    const hide = () => {
-      clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => (open.value = false), 120);
-    };
-    onUnmounted(() => clearTimeout(hideTimer));
+    // 浮层走 PortalTip（见 hover-tip.js）：压缩块住在中间过程组里，行内浮层会被吸顶标题压住。
+    const { anchor, show, hide, tip } = useHoverTip();
     return () => {
       const startedAt = Number(props.compaction?.startedAt);
       if (!Number.isFinite(startedAt)) return null;
@@ -54,18 +45,17 @@ export default defineComponent({
           "span",
           {
             class: "compaction-done-time",
+            ref: anchor,
             onMouseenter: show,
             onMouseleave: hide,
           },
           [
             compactionDoneText(durationMs),
-            open.value
-              ? h("span", { class: "status-tip", role: "tooltip" }, [
-                  h("span", `开始时间：${formatFullTime(startedAt)}`),
-                  h("span", `结束时间：${formatFullTime(endedAt)}`),
-                  h("span", `总耗时：${formatProcessingDuration(durationMs)}`),
-                ])
-              : null,
+            tip([
+              h("span", `开始时间：${formatFullTime(startedAt)}`),
+              h("span", `结束时间：${formatFullTime(endedAt)}`),
+              h("span", `总耗时：${formatProcessingDuration(durationMs)}`),
+            ]),
           ],
         ),
       );

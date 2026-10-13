@@ -25,12 +25,22 @@ import {
   parseToolDiff,
   resultText,
   splitToolNotices,
+  stateLineText,
+  toolSummary,
   toolCommand,
   toolFilePath,
   toolInputRows,
   toolTitleArgument,
 } from "../web/components/conversation/ToolCallBlock.js";
-import { codeBlock } from "../web/markdown.js";
+import {
+  annotateIntraLine,
+  wordSegments,
+} from "../web/components/conversation/wordDiff.js";
+import {
+  codeBlock,
+  renderInlineMarkdown,
+  stripInlineMarkdown,
+} from "../web/markdown.js";
 import {
   activityLook,
   nextActivityTab,
@@ -47,7 +57,7 @@ import {
   readStoredContentWidth,
   storeContentWidth,
 } from "../web/components/layout/ColumnResizer.js";
-import { VIEW_TABS, nextTab } from "../web/components/layout/ViewTabs.js";
+import { VIEW_TABS, VISIBLE_TABS, nextTab } from "../web/components/layout/ViewTabs.js";
 import { contextSummaries } from "../web/views/ContextView.js";
 import { compactionPreview } from "../web/components/conversation/MessageItem.js";
 import { compactionDoneText } from "../web/components/conversation/CompactionStatus.js";
@@ -57,6 +67,7 @@ import {
 } from "../web/views/SettingsView.js";
 import {
   DEFAULT_SETTINGS,
+  DEFAULT_VIEWS,
   MAX_SAFE_AREA,
   clampSafeArea,
   isEditableNode,
@@ -360,8 +371,12 @@ test("content width clamps to the viewport and round-trips through storage", () 
 import {
   buildTurnGroup,
   groupMessages,
+  isCompactionMessage,
+  isManualCompactionMessage,
+  splitRunningTail,
   turnCounts,
   turnTitle,
+  turnTitleParts,
 } from "../web/components/conversation/turnGroups.js";
 
 test("turn counts follow the fixed order and drop empty segments", () => {
@@ -402,6 +417,8 @@ test("turn counts follow the fixed order and drop empty segments", () => {
     tools: 2,
     skills: 1,
     texts: 2,
+    steers: 0,
+    compactions: 0,
   });
   // 分组只统计中间过程：最终输出那条正文不计入
   assert.deepEqual(buildTurnGroup(messages).counts, {
@@ -409,20 +426,225 @@ test("turn counts follow the fixed order and drop empty segments", () => {
     tools: 2,
     skills: 1,
     texts: 1,
+    steers: 0,
+    compactions: 0,
   });
   assert.equal(
     turnTitle({ thinking: 2, tools: 2, skills: 1, texts: 1 }),
-    "2 次思考过程 · 2 次工具调用 · 1 次技能调用 · 1 条消息",
+    "思考2 · 工具调用2 · 技能调用1 · 消息1",
   );
+  // 「引导」与「压缩」是本轮的元信息：排在流程计数之后，压缩固定垫底
+  assert.equal(
+    turnTitle({
+      steers: 3,
+      compactions: 2,
+      thinking: 2,
+      tools: 2,
+      skills: 1,
+      texts: 1,
+    }),
+    "思考2 · 工具调用2 · 技能调用1 · 消息1 · 引导3 · 压缩2",
+  );
+  assert.equal(turnTitle({ steers: 1, compactions: 1 }), "引导1 · 压缩1");
+  assert.equal(turnTitle({ compactions: 1 }), "压缩1");
   assert.equal(
     turnTitle({ thinking: 0, tools: 3, skills: 0, texts: 2 }),
-    "3 次工具调用 · 2 条消息",
+    "工具调用3 · 消息2",
+  );
+  assert.equal(turnTitle({ thinking: 1, tools: 0, skills: 0, texts: 0 }), "思考1");
+  assert.equal(turnTitle({ thinking: 0, tools: 0, skills: 0, texts: 0 }), "");
+  // 页面上数量是独立的徽片，所以结构化的分段与纯文本同样输出
+  assert.deepEqual(
+    turnTitleParts({ thinking: 2, tools: 2, skills: 1, texts: 1 }),
+    [
+      { label: "思考", value: 2 },
+      { label: "工具调用", value: 2 },
+      { label: "技能调用", value: 1 },
+      { label: "消息", value: 1 },
+    ],
+  );
+  assert.deepEqual(turnTitleParts({}), []);
+  assert.deepEqual(buildTurnGroup(messages).titleParts, [
+    { label: "思考", value: 2 },
+    { label: "工具调用", value: 2 },
+    { label: "技能调用", value: 1 },
+    { label: "消息", value: 1 },
+  ]);
+});
+
+test("steering messages join the turn they interrupted and trail the title", () => {
+  const messages = [
+    { id: "u1", role: "user", content: "原始问题" },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls" } }],
+    },
+    { id: "r1", role: "toolResult", toolCallId: "t1", content: "ok" },
+    { id: "u2", role: "user", content: "补一句", delivery: "steer" },
+    {
+      id: "a2",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "重新定向" },
+        { type: "text", text: "最终答案" },
+      ],
+    },
+  ];
+  const items = groupMessages(messages, {});
+  // 引导消息不切断分组：整轮仍然只有一个折叠块，引导气泡在块内
+  assert.deepEqual(
+    items.map((item) => item.kind),
+    ["message", "group", "message"],
+  );
+  assert.equal(items[0].message.id, "u1");
+  assert.equal(items[2].message.id, "a2");
+  const { group } = items[1];
+  assert.equal(group.counts.steers, 1);
+  assert.deepEqual(
+    group.intermediate.map((message) => message.id),
+    ["a1", "r1", "u2", "a2"],
+  );
+  // 标题里「引导」排在流程计数之后（倒数第二），最终输出的正文不计入
+  assert.deepEqual(group.titleParts, [
+    { label: "思考", value: 1 },
+    { label: "工具调用", value: 1 },
+    { label: "引导", value: 1 },
+  ]);
+  assert.equal(group.title, "思考1 · 工具调用1 · 引导1");
+  // 普通用户输入仍然切断分组
+  const split = groupMessages(
+    [...messages, { id: "u3", role: "user", content: "下一个问题" }],
+    {},
   );
   assert.equal(
-    turnTitle({ thinking: 1, tools: 0, skills: 0, texts: 0 }),
-    "1 次思考过程",
+    split.filter((item) => item.kind === "group").length,
+    1,
   );
-  assert.equal(turnTitle({ thinking: 0, tools: 0, skills: 0, texts: 0 }), "");
+  assert.equal(split[split.length - 1].message.id, "u3");
+});
+
+test("compaction joins the turn as an intermediate step and trails the title", () => {
+  const messages = [
+    { id: "u1", role: "user", content: "继续查" },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先看常量" },
+        { type: "toolCall", id: "t1", name: "ctx_execute", arguments: {} },
+      ],
+    },
+    { id: "r1", role: "toolResult", toolCallId: "t1", content: "4096" },
+    // 自动压缩发生在同一个 agent run 内部，不该把一个连续任务切成两轮
+    { id: "c1", role: "compactionSummary", summary: "已压缩", tokensBefore: 200163 },
+    {
+      id: "a2",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "齐了" },
+        { type: "text", text: "结论如此" },
+      ],
+    },
+  ];
+  const items = groupMessages(messages, {});
+  assert.deepEqual(
+    items.map((item) => item.kind),
+    ["message", "group", "message"],
+  );
+  const { group } = items[1];
+  assert.deepEqual(
+    group.intermediate.map((message) => message.id),
+    ["a1", "r1", "c1", "a2"],
+  );
+  assert.equal(group.counts.compactions, 1);
+  // 「压缩」始终排在最后
+  assert.deepEqual(group.titleParts, [
+    { label: "思考", value: 2 },
+    { label: "工具调用", value: 1 },
+    { label: "压缩", value: 1 },
+  ]);
+  assert.equal(group.title, "思考2 · 工具调用1 · 压缩1");
+});
+
+// 手动 `/compact` 不是模型自己执行的一步，而是用户显式按下的页面边界（用户 2026-09-23）：
+// 它不能钻进 `disclosure-block turn-group`，得自己单独渲染。
+test("a manual compaction is a page boundary instead of a step of the turn", () => {
+  const manual = {
+    id: "c-manual",
+    role: "compactionSummary",
+    summary: "手动压缩",
+    tokensBefore: 200163,
+    compactionReason: "manual",
+  };
+  assert.equal(isManualCompactionMessage(manual), true);
+  assert.equal(isCompactionMessage(manual), false);
+  assert.equal(
+    isCompactionMessage({ id: "c-auto", role: "compactionSummary", summary: "自动", compactionReason: "threshold" }),
+    true,
+  );
+
+  const items = groupMessages(
+    [
+      { id: "u1", role: "user", content: "继续查" },
+      {
+        id: "a1",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先看常量" },
+          { type: "toolCall", id: "t1", name: "ctx_execute", arguments: {} },
+        ],
+      },
+      { id: "r1", role: "toolResult", toolCallId: "t1", content: "4096" },
+      // 自动压缩：仍算本轮的一步，并计入标题
+      {
+        id: "c-auto",
+        role: "compactionSummary",
+        summary: "自动压缩",
+        tokensBefore: 200163,
+        compactionReason: "threshold",
+      },
+      {
+        id: "a2",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "齐了" },
+          { type: "text", text: "结论如此" },
+        ],
+      },
+      // 手动压缩：单独一条条目，不钻进前面的折叠组，也不计入标题
+      manual,
+    ],
+    {},
+  );
+  assert.deepEqual(
+    items.map((item) => item.kind),
+    ["message", "group", "message", "message"],
+  );
+  const { group } = items[1];
+  assert.deepEqual(
+    group.intermediate.map((message) => message.id),
+    ["a1", "r1", "c-auto", "a2"],
+  );
+  assert.equal(group.counts.compactions, 1);
+  assert.equal(group.title, "思考2 · 工具调用1 · 压缩1");
+  assert.equal(items[3].message.id, "c-manual");
+});
+
+test("a compaction alone still counts as the turn's middle", () => {
+  const items = groupMessages(
+    [
+      { id: "u1", role: "user", content: "问" },
+      { id: "c1", role: "compactionSummary", summary: "已压缩", tokensBefore: 10 },
+      { id: "a1", role: "assistant", content: [{ type: "text", text: "答" }] },
+    ],
+    {},
+  );
+  assert.deepEqual(
+    items.map((item) => item.kind),
+    ["message", "group", "message"],
+  );
+  assert.equal(items[1].group.title, "压缩1");
 });
 
 test("turn groups keep the final output outside the collapsed middle", () => {
@@ -455,7 +677,7 @@ test("turn groups keep the final output outside the collapsed middle", () => {
     items.map((item) => item.kind),
     ["group", "message"],
   );
-  assert.equal(items[0].group.title, "2 次思考过程 · 1 次工具调用");
+  assert.equal(items[0].group.title, "思考2 · 工具调用1");
   const { group } = items[0];
   assert.equal(group.key, "turn-a1");
   assert.equal(group.finalMessage.id, "a2");
@@ -506,7 +728,7 @@ test("turn groups skip turns without middle steps and break on other roles", () 
   assert.equal(withNotice[1].message.role, "notification");
 });
 
-test("turn groups stay expanded until the next user message arrives", () => {
+test("only the running turn keeps its group expanded", () => {
   const process = (id) => ({
     id,
     role: "assistant",
@@ -515,36 +737,59 @@ test("turn groups stay expanded until the next user message arrives", () => {
   const notice = { id: "n1", role: "notification", level: "info", content: "通知" };
   const user = (id) => ({ id, role: "user", content: "继续" });
 
-  // 末尾没有用户输入：即使整轮输出早已停止，分组也保持展开
+  // 本轮已经结束（默认 running=false）：连末尾那一组也折叠
   const tail = groupMessages([process("a1"), notice, process("a2")]);
   assert.deepEqual(
     tail.filter((item) => item.kind === "group").map((item) => item.keepOpen),
-    [true, true],
+    [false, false],
   );
   // 通知不折叠（只切断分组）
   assert.equal(tail[1].kind, "message");
 
-  // 下一个用户输入开始：它之前的分组折叠；通知不折叠（只切断分组）
-  const withUser = groupMessages([
-    process("a1"),
-    notice,
-    process("a2"),
-    user("u1"),
-    process("a3"),
-  ]);
+  // 正在进行：只有末尾那一轮展开，它之前的分组一律折叠
+  const withUser = groupMessages(
+    [process("a1"), notice, process("a2"), user("u1"), process("a3")],
+    { running: true },
+  );
   assert.deepEqual(
     withUser
       .filter((item) => item.kind === "group")
       .map((item) => item.keepOpen),
-    [true, false, true],
+    [false, false, true],
   );
 
-  // 浏览器里已显示、尚未进入历史的用户消息同样算「用户输入开始」
+  // 用户输入不再提前折叠上一轮；末尾展不展开只看 running
   assert.equal(
     groupMessages([process("a1")], { nextUserInput: true })[0].keepOpen,
     false,
   );
-  assert.equal(groupMessages([process("a1")])[0].keepOpen, true);
+  assert.equal(groupMessages([process("a1")], { running: true })[0].keepOpen, true);
+});
+
+test("手动折叠父级会级联收起子级，之后子级自己展开则压过级联", () => {
+  setActivePinia(createPinia());
+  const store = useConversationStore();
+  const turn = "t1";
+  const stage = "t1:stage-0";
+  const card = "m1-thinking-0";
+  // 用户手动展开过中间过程组与它里面的一张卡片
+  store.setDisclosure(stage, true);
+  store.setDisclosure(card, true);
+  assert.equal(store.disclosure(stage, false, [turn]), true);
+  assert.equal(store.disclosure(card, false, [turn, stage]), true);
+  // 折叠轮次标题：组与卡片一并收起，且父级再展开也不恢复（用户选定「不恢复」）
+  store.markCollapsed(turn);
+  assert.equal(store.disclosure(stage, false, [turn]), false);
+  assert.equal(store.disclosure(card, false, [turn, stage]), false);
+  // 折叠之后用户再手动展开卡片：序号刷新，卡片重新展开，组仍然收起
+  store.setDisclosure(card, true);
+  assert.equal(store.disclosure(card, false, [turn, stage]), true);
+  assert.equal(store.disclosure(stage, false, [turn]), false);
+  // 折叠中间过程组：连没有自身记录的卡片（默认展开档）也一并压住
+  store.markCollapsed(stage);
+  assert.equal(store.disclosure(card, true, [turn, stage]), false);
+  // 轮次标题自己没有祖先，不受子级影响
+  assert.equal(store.disclosure(turn, true), true);
 });
 
 test("history merge keeps loaded turns when the server window slides", () => {
@@ -635,7 +880,7 @@ test("prepended history is merged in front without touching rendered entries", (
   assert.equal(store.collapseLoaded, false);
 });
 
-test("loading collapses every loaded middle-step group", () => {
+test("middle-step groups stay collapsed unless that turn is running", () => {
   const turn = (i) => [
     { id: `u${i}`, role: "user", content: `问题 ${i}` },
     {
@@ -655,21 +900,21 @@ test("loading collapses every loaded middle-step group", () => {
     { id: `f${i}`, role: "assistant", content: [{ type: "text", text: `结论 ${i}` }] },
   ];
   const messages = [...turn(0), ...turn(1)];
-  // 默认：第一轮后面已有用户输入→折叠；末尾那一轮保持展开
+  // 新口径：折叠只看本轮是否正在进行 —— 没在跑就连末尾那一轮也收起
   assert.deepEqual(
     groupMessages(messages)
       .filter((item) => item.kind === "group")
       .map((item) => item.keepOpen),
-    [false, true],
+    [false, false],
   );
-  // 加载（首次快照 / /reload）：已加载的中间过程全部折叠
+  // 加载（首次快照 / /reload）：结果完全相同（collapseLoaded 不再参与折叠判定）
   assert.deepEqual(
     groupMessages(messages, { collapseLoaded: true })
       .filter((item) => item.kind === "group")
       .map((item) => item.keepOpen),
     [false, false],
   );
-  // 加载时会话还在生成：保留正在跑的那一轮
+  // 只有正在生成的那一轮展开
   assert.deepEqual(
     groupMessages(messages, { collapseLoaded: true, running: true })
       .filter((item) => item.kind === "group")
@@ -710,6 +955,67 @@ test("sub-second durations use a readable collapsed label and retain millisecond
   assert.equal(formatDuration(1000, false), "1s");
 });
 import { renderMarkdown } from "../web/markdown.js";
+
+test("inline markdown titles produce only inline tags and a whitelist without attributes", () => {
+  const previous = { marked: globalThis.marked, DOMPurify: globalThis.DOMPurify };
+  globalThis.marked = markedLibrary;
+  let sanitizeOptions;
+  globalThis.DOMPurify = {
+    sanitize: (value, options) => {
+      sanitizeOptions = options;
+      return value;
+    },
+  };
+  try {
+    assert.equal(renderInlineMarkdown("消息队列 `3`"), "消息队列 <code>3</code>");
+    assert.equal(
+      renderInlineMarkdown("**确认** 还是 `跳过`"),
+      "<strong>确认</strong> 还是 <code>跳过</code>",
+    );
+    // tab 是一行高的槽位：块级标记绝不能长出块级盒子
+    assert.doesNotMatch(
+      renderInlineMarkdown("# 标题\n- 项目"),
+      /<(p|ul|li|h1)[\s>]/,
+    );
+    // 清洗策略：属性全清（tab 自身可点击，不能嵌交互），且不放行 a/img/script
+    renderInlineMarkdown("x");
+    assert.deepEqual(sanitizeOptions.ALLOWED_ATTR, []);
+    for (const tag of ["code", "strong", "em"])
+      assert.ok(sanitizeOptions.ALLOWED_TAGS.includes(tag));
+    for (const tag of ["a", "img", "script", "p", "iframe"])
+      assert.ok(!sanitizeOptions.ALLOWED_TAGS.includes(tag));
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
+test("inline markdown falls back to escaped source instead of a blank or raw title", () => {
+  const previous = { marked: globalThis.marked, DOMPurify: globalThis.DOMPurify };
+  delete globalThis.marked;
+  delete globalThis.DOMPurify;
+  try {
+    assert.equal(
+      renderInlineMarkdown("a <script>alert(1)</script> `b`"),
+      "a &lt;script&gt;alert(1)&lt;/script&gt; `b`",
+    );
+    assert.equal(renderInlineMarkdown(""), "");
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
+test("plain-text activity names drop markdown markers but keep intra-word underscores", () => {
+  assert.equal(stripInlineMarkdown("消息队列 `3`"), "消息队列 3");
+  assert.equal(stripInlineMarkdown("**确认** 还是 `跳过`"), "确认 还是 跳过");
+  assert.equal(stripInlineMarkdown("~~删~~ *斜* 体"), "删 斜 体");
+  assert.equal(stripInlineMarkdown("[提问](https://example.com)"), "提问");
+  // 包名这类含下划线的标题不能被剔字
+  assert.equal(
+    stripInlineMarkdown("@juicesharp/rpiv-ask_user_question"),
+    "@juicesharp/rpiv-ask_user_question",
+  );
+  assert.equal(stripInlineMarkdown(undefined), "");
+});
 
 test("token moves from fragment into session storage without accepting malformed values", () => {
   const storage = new Map();
@@ -1130,6 +1436,7 @@ test("a successful reconnect resets exponential backoff before the next disconne
   const transport = createEventStream({
     token: "a".repeat(64),
     onEvent() {},
+    idleLimitMs: 0, // 本用例只观察重连退避的延时序列，不要让看门狗混进 setTimer
     fetchImpl: async () => {
       requests += 1;
       return new Response(
@@ -1176,7 +1483,7 @@ const fakeStorage = () => {
   };
 };
 
-test("top tabs cycle in order and with the keyboard, skipping disabled ones", () => {
+test("top tabs cycle in order and with the keyboard, skipping hidden and disabled ones", () => {
   assert.deepEqual(
     VIEW_TABS.map((tab) => tab.id),
     ["chat", "trace", "context", "settings"],
@@ -1184,17 +1491,22 @@ test("top tabs cycle in order and with the keyboard, skipping disabled ones", ()
   // 对话与轨迹共用同一个面板，上下文/设置各自一个。
   assert.equal(VIEW_TABS[0].panel, VIEW_TABS[1].panel);
   assert.notEqual(VIEW_TABS[2].panel, VIEW_TABS[3].panel);
-  // 执行轨迹将改为独立页面，在完成前保持可见但不可选中。
+  // 执行轨迹（将来是独立页面）与上下文页暂时隐藏：视图代码保留，但不渲染 tab。
   assert.equal(VIEW_TABS[1].disabled, true);
-  assert.equal(
-    VIEW_TABS.filter((tab) => tab.disabled).length,
-    1,
+  assert.deepEqual(
+    VIEW_TABS.filter((tab) => tab.hidden).map((tab) => tab.id),
+    ["trace", "context"],
   );
-  assert.equal(nextTab("chat", "ArrowRight"), "context");
+  assert.deepEqual(
+    VISIBLE_TABS.map((tab) => tab.id),
+    ["chat", "settings"],
+  );
+  assert.equal(nextTab("chat", "ArrowRight"), "settings");
   assert.equal(nextTab("chat", "ArrowLeft"), "settings");
   assert.equal(nextTab("settings", "ArrowRight"), "chat");
-  assert.equal(nextTab("context", "Home"), "chat");
-  assert.equal(nextTab("context", "End"), "settings");
+  // 暂时隐藏的视图不是可选项，键盘不处理。
+  assert.equal(nextTab("context", "Home"), null);
+  assert.equal(nextTab("trace", "End"), null);
   assert.equal(nextTab("chat", "Enter"), null);
   assert.equal(nextTab("unknown", "ArrowRight"), null);
 });
@@ -1239,9 +1551,10 @@ test("settings read/write their own keys with safe fallbacks", () => {
   });
   assert.equal(normalizeTheme("紫色"), DEFAULT_SETTINGS.theme);
   assert.equal(normalizeSettings({ defaultView: "settings" }).defaultView, "chat");
-  // 轨迹不是默认视图选项（将改为独立页面）。
+  // 轨迹与上下文页暂时隐藏（将改为独立页面），不再作为默认视图选项。
   assert.equal(normalizeSettings({ defaultView: "trace" }).defaultView, "chat");
-  assert.equal(normalizeSettings({ defaultView: "context" }).defaultView, "context");
+  assert.equal(normalizeSettings({ defaultView: "context" }).defaultView, "chat");
+  assert.deepEqual(DEFAULT_VIEWS, ["chat"]);
   assert.equal(normalizeSettings({ autoCollapse: "x" }).autoCollapse, true);
   assert.equal(normalizeSettings(null).autoFollow, true);
 
@@ -1252,16 +1565,22 @@ test("settings read/write their own keys with safe fallbacks", () => {
   assert.equal(resolveDark("system", false), false);
 
   storeSettings(
-    { defaultView: "context", autoCollapse: false, autoFollow: true },
+    { defaultView: "chat", autoCollapse: false, autoFollow: true },
     storage,
   );
   assert.deepEqual(JSON.parse(storage.getItem("atom-settings")), {
-    defaultView: "context",
+    defaultView: "chat",
     autoCollapse: false,
     autoFollow: true,
     safeAreaTop: 0,
     safeAreaBottom: 0,
   });
+  // 旧记忆里存的「上下文」不会原样写回：先经 normalize 回落到对话页。
+  storeSettings(
+    normalizeSettings({ defaultView: "context", autoCollapse: true }),
+    storage,
+  );
+  assert.equal(JSON.parse(storage.getItem("atom-settings")).defaultView, "chat");
   storeTheme("dark", storage);
   assert.equal(storage.getItem("atom-theme"), "dark");
 });
@@ -1470,4 +1789,209 @@ test("compaction block preview and completion line use the host numbers", () => 
   assert.equal(compactionDoneText(168000), "压缩完成（耗时2分钟48秒）");
   assert.equal(compactionDoneText(42000), "压缩完成（耗时42秒）");
   assert.equal(compactionDoneText(0), "压缩完成（耗时0秒）");
+});
+
+test("intra-line word diff marks only the changed tokens", () => {
+  const oldText = "const speed = usage.output / elapsed;";
+  const newText = "const speed = averageSpeed(session) / elapsed;";
+  const pair = wordSegments(oldText, newText);
+  const changed = (list) =>
+    list.filter((segment) => segment.changed).map((segment) => segment.text).join("");
+  // 行内只圈出真正改掉的字段，未变的 const/速度变量名/分号不进高亮段。
+  assert.equal(changed(pair.removed), "usage.output");
+  assert.equal(changed(pair.added), "averageSpeed(session)");
+  assert.equal(pair.removed.map((segment) => segment.text).join(""), oldText);
+  assert.equal(pair.added.map((segment) => segment.text).join(""), newText);
+  // 行首缩进不算改动（与 pi TUI 一致，否则整行看着都像被重写）。
+  const indented = wordSegments("    let x = 1;", "    let x = 2;");
+  assert.equal(indented.removed[0].changed, false);
+  assert.ok(indented.removed[0].text.startsWith("    "));
+  assert.equal(indented.added.find((segment) => segment.changed).text, "2");
+  // 中文按字为粒度，删掉的整段落在被删那一侧。
+  const cjk = wordSegments("平均输出速度（正文与思考）", "平均输出速度");
+  assert.equal(
+    cjk.removed.filter((segment) => segment.changed).map((segment) => segment.text).join(""),
+    "（正文与思考）",
+  );
+});
+
+test("intra-line annotation pairs equal-length runs and skips the rest", () => {
+  const rows = annotateIntraLine([
+    { kind: "removed", content: "a = 1;" },
+    { kind: "added", content: "a = 2;" },
+    { kind: "removed", content: "x = 1;" },
+    { kind: "removed", content: "y = 1;" },
+    { kind: "added", content: "z = 3;" },
+  ]);
+  assert.equal(rows[0].segments.find((segment) => segment.changed).text, "1");
+  assert.equal(rows[1].segments.find((segment) => segment.changed).text, "2");
+  // 删 2 增 1 时不猜哪两行对应，整段按原样显示。
+  assert.equal(rows[2].segments, undefined);
+  assert.equal(rows[4].segments, undefined);
+  // 不修改入参
+  assert.equal(
+    annotateIntraLine([{ kind: "context", content: "keep" }])[0].segments,
+    undefined,
+  );
+});
+
+test("tool state lines and failure reason surface host errors", () => {
+  assert.equal(stateLineText("编辑", "running"), "正在编辑");
+  assert.equal(stateLineText("编辑", "done"), "成功编辑");
+  // 失败不能再写「成功」；中止是宿主的 isError，措辞分开。
+  assert.equal(stateLineText("编辑", "failed"), "编辑失败");
+  assert.equal(stateLineText("读取", "aborted"), "读取已中止");
+  // 报错正文就是 toolResult 的文本：状态行右侧不再摆一份摘要，完整报错统一由
+  // 下方 .tool-failure 块展示（所以这里不再拆首行 / 剩余行）。
+  assert.equal(
+    resultText({
+      isError: true,
+      content: [{ type: "text", text: "未找到匹配文本\n  at edit.js:12" }],
+    }).trim(),
+    "未找到匹配文本\n  at edit.js:12",
+  );
+  assert.equal(resultText({ content: [] }), "");
+});
+
+test("collapsed tool summaries use the output, or the error text on failure", () => {
+  // 摘要口径与思考块一致：连续空白与换行都压成单个空格。
+  assert.equal(
+    toolSummary({ content: [{ type: "text", text: "第1行\n  第2行\t带\t制表\n" }] }),
+    "第1行 第2行 带 制表",
+  );
+  // 报错时输出就是报错信息，直接当摘要。
+  assert.equal(
+    toolSummary({
+      isError: true,
+      content: [{ type: "text", text: "未找到匹配文本：\n  oldText: p" }],
+    }),
+    "未找到匹配文本： oldText: p",
+  );
+  // 运行中用 partialResult；两者都没有时不编摘要（返回空串，前端不渲染）。
+  assert.equal(toolSummary(null, { partialResult: "已经跑出来的\n输出" }), "已经跑出来的 输出");
+  assert.equal(toolSummary(null, undefined), "");
+  assert.equal(toolSummary({ content: [{ type: "text", text: "   \n " }] }), "");
+  // 超长截断（CSS 之外再兜一层，避免一行里塞几百 KB 文本）
+  const long = toolSummary({ content: [{ type: "text", text: "x".repeat(400) }] });
+  assert.equal(long.length, 301);
+  assert.ok(long.endsWith("…"));
+});
+
+test("中间过程按正文块切成若干中间过程组，正文本身平铺在组之间", () => {
+  const group = buildTurnGroup([
+    {
+      id: "s-a1",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "第一步" },
+        { type: "toolCall", id: "s-c1", name: "bash", arguments: { command: "ls" } },
+      ],
+    },
+    { id: "s-r1", role: "toolResult", toolCallId: "s-c1", toolName: "bash", content: [{ type: "text", text: "ok" }] },
+    {
+      id: "s-a2",
+      role: "assistant",
+      content: [
+        { type: "text", text: "第一段说明" },
+        { type: "thinking", thinking: "第二步" },
+      ],
+    },
+    { id: "s-a3", role: "assistant", content: [{ type: "text", text: "最终输出" }] },
+  ]);
+  // 组1 / 消息1 / 组2；最终输出仍在轮次分组外面
+  assert.deepEqual(group.body.map((item) => item.kind), ["stage", "text", "stage"]);
+  const [first, separator, second] = group.body;
+  // 组标题只算本组：两段思考各算自己那一组
+  assert.deepEqual(first.stage.titleParts, [
+    { label: "思考", value: 1 },
+    { label: "工具调用", value: 1 },
+  ]);
+  assert.deepEqual(second.stage.titleParts, [{ label: "思考", value: 1 }]);
+  // 工具结果跟着前面的工具调用进同一组，不切断分组
+  assert.deepEqual(first.stage.items.map((item) => [item.offset, item.message.id]), [
+    [0, "s-a1"],
+    [0, "s-r1"],
+  ]);
+  // 平铺的「消息」只带那一个正文块；offset 是它原本的下标（思考块身份 = `${id}-thinking-${下标}`）
+  assert.equal(separator.unit.offset, 0);
+  assert.deepEqual(separator.unit.message.content, [{ type: "text", text: "第一段说明" }]);
+  assert.deepEqual(second.stage.items.map((item) => [item.offset, item.message.content[0].type]), [
+    [1, "thinking"],
+  ]);
+  // 轮次标题仍是全轮总数（各组之和 + 平铺的消息）
+  assert.equal(group.title, "思考2 · 工具调用1 · 消息1");
+  // 组 key 带轮次前缀且连续，空组不占号
+  assert.deepEqual(group.stages.map((stage) => stage.key), [
+    "turn-s-a1:stage-0",
+    "turn-s-a1:stage-1",
+  ]);
+});
+
+test("字符串正文与没有块的 assistant 消息不会被切组吞掉", () => {
+  const group = buildTurnGroup([
+    { id: "q-a1", role: "assistant", content: "历史消息" },
+    {
+      id: "q-a2",
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "q-c1", name: "read", arguments: { path: "a.ts" } },
+      ],
+    },
+  ]);
+  assert.deepEqual(group.body.map((item) => item.kind), ["text", "stage"]);
+  assert.equal(group.body[0].unit.message.content, "历史消息");
+  assert.equal(group.body[0].unit.offset, 0);
+  assert.deepEqual(group.stages[0].items.map((item) => item.message.id), ["q-a2"]);
+});
+
+test("splitRunningTail 把还在进行的那一整轮交给 live 区（按轮分流）", () => {
+  const ids = (list) => list.map((message) => message.id);
+  const done = [
+    { id: "s-u1", role: "user", content: "上一问" },
+    { id: "s-a1", role: "assistant", content: [{ type: "text", text: "上一答" }] },
+    { id: "s-u2", role: "user", content: "这一问" },
+  ];
+  const run = [
+    {
+      id: "s-a2",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先看" },
+        { type: "toolCall", id: "s-c1", name: "bash", arguments: { command: "ls" } },
+      ],
+    },
+    {
+      id: "s-r1",
+      role: "toolResult",
+      toolCallId: "s-c1",
+      toolName: "bash",
+      content: [{ type: "text", text: "a.ts" }],
+      isError: false,
+    },
+  ];
+  const messages = [...done, ...run];
+  const split = splitRunningTail(messages, { running: true });
+  assert.deepEqual(ids(split.history), ["s-u1", "s-a1", "s-u2"]);
+  assert.deepEqual(ids(split.tail), ["s-a2", "s-r1"]);
+  // 本轮结束（running 变假）后整轮回到历史，live 区不再摘任何东西。
+  const idle = splitRunningTail(messages, { running: false });
+  assert.equal(idle.tail.length, 0);
+  assert.deepEqual(ids(idle.history), ids(messages));
+  // 乐观用户消息已经代表新的一轮（只是还没落库）：这时不摘尾，
+  // 免得把上一轮的尾巴错并到新一轮里。
+  const pending = splitRunningTail(messages, {
+    running: true,
+    hasPendingUser: true,
+  });
+  assert.equal(pending.tail.length, 0);
+  assert.deepEqual(ids(pending.history), ids(messages));
+  // 移交不跳：live 区自己算出的轮次分组 key 必须与历史里那一组的 key 完全一致
+  // （折叠状态与级联水位线都按 blockKey 记账）。
+  const groups = groupMessages(messages, { running: true }).filter(
+    (entry) => entry.kind === "group",
+  );
+  assert.equal(
+    buildTurnGroup(split.tail).key,
+    groups[groups.length - 1].group.key,
+  );
 });

@@ -10,20 +10,37 @@ test("session state is isolated by workspace and session and survives a new stor
   try {
     const store = createSessionStateStore({ cwd, sessionId: "session-1", debounceMs: 5 });
     assert.deepEqual(await store.load(), {
-      schemaVersion: 1, toolTimings: {}, thinkingTimings: {}, disclosures: {}, displayRecords: [],
-      turnProcessing: {},
+      schemaVersion: 1, toolTimings: {}, thinkingTimings: {}, compactionTimings: {},
+      compactionReasons: {},
+      disclosures: {}, displayRecords: [], steeringDeliveries: [], turnProcessing: {},
+      generation: { tokens: 0, ms: 0, messages: 0 },
     });
     store.update((state) => {
       state.toolTimings.tool = { startedAt: 10, endedAt: 30, durationMs: 20 };
       state.thinkingTimings.thought = { startedAt: 12, durationMs: 18 };
+      // 生成速度的累计观测（只含正文与思考）：重启后均值不能归零
+      state.generation = { tokens: 1200, ms: 6000, messages: 3 };
+      // 自动压缩的耗时按压缩条目 id 索引，刷新后仍能显示在折叠块标题右侧
+      state.compactionTimings["entry-auto"] = { startedAt: 11, durationMs: 34_000 };
+      // 压缩触发原因（手动 / 自动）：前端分流靠它，同样要落盘
+      state.compactionReasons["entry-auto"] = "threshold";
       state.disclosures.thought = true;
+      // 引导送达只存 `{hash}:{长度}` 短签名，不存 Prompt 原文
+      state.steeringDeliveries.push("abc123:9", "", 42, "x".repeat(200));
       state.displayRecords.push({ id: "record", sessionId: "session-1", anchor: null, message: { role: "command", content: "/name test" } });
     });
     await store.flush();
     const file = join(cwd, ".pi", "atom", "session-1", "web-state.json");
     assert.equal(JSON.parse(await readFile(file, "utf8")).toolTimings.tool.durationMs, 20);
+    assert.equal(
+      JSON.parse(await readFile(file, "utf8")).compactionTimings["entry-auto"].durationMs,
+      34_000,
+    );
     const restored = createSessionStateStore({ cwd, sessionId: "session-1" });
     assert.deepEqual(await restored.load(), store.value());
+    assert.equal(restored.value().compactionReasons["entry-auto"], "threshold");
+    assert.deepEqual(restored.value().generation, { tokens: 1200, ms: 6000, messages: 3 });
+    assert.deepEqual(store.value().steeringDeliveries, ["abc123:9"]);
     await restored.close();
     await store.close();
   } finally { await rm(cwd, { recursive: true, force: true }); }
@@ -118,6 +135,35 @@ test("turnProcessing survives a persist and restore round trip", async () => {
       durationMs: 90_000,
       status: "done",
     });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+// 压缩触发原因是前端分流（手动=页面边界 / 自动=本轮的一步）的唯一依据，而宿主只在事件里给，
+// 所以必须落盘；非法值要丢掉，不能让脏数据进内存再进协议。
+test("compactionReasons persist and drop unknown reasons", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-atom-web-reasons-"));
+  try {
+    const store = createSessionStateStore({ cwd, sessionId: "reasons", debounceMs: 5 });
+    store.update((state) => {
+      state.compactionReasons["entry-manual"] = "manual";
+      state.compactionReasons["entry-threshold"] = "threshold";
+      state.compactionReasons["entry-overflow"] = "overflow";
+      state.compactionReasons["entry-bad"] = "user";
+      state.compactionReasons["entry-number"] = 1;
+      state.compactionReasons[""] = "manual";
+    });
+    await store.flush();
+    await store.close();
+
+    const reopened = createSessionStateStore({ cwd, sessionId: "reasons" });
+    assert.deepEqual(await reopened.load().then((state) => state.compactionReasons), {
+      "entry-manual": "manual",
+      "entry-threshold": "threshold",
+      "entry-overflow": "overflow",
+    });
+    await reopened.close();
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

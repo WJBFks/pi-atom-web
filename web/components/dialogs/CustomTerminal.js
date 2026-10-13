@@ -7,6 +7,7 @@ import {
   watch,
 } from "vue";
 import { postAction } from "../../api/actions.js";
+import { apiPath } from "../../api/base.js";
 
 let xtermPromise;
 const loadAsset = (tag, url) =>
@@ -24,9 +25,12 @@ const loadAsset = (tag, url) =>
   });
 const loadXterm = () => {
   if (globalThis.Terminal) return Promise.resolve(globalThis.Terminal);
+  // 必须相对当前页面：走网关时页面挂在 `/<会话短码>/` 下，写死 `/xterm.css` 会打到站点根。
+  const styleUrl = apiPath("xterm.css");
+  const scriptUrl = apiPath("xterm.js");
   xtermPromise ||= Promise.all([
-    loadAsset("link", "/xterm.css"),
-    loadAsset("script", "/xterm.js"),
+    loadAsset("link", styleUrl),
+    loadAsset("script", scriptUrl),
   ])
     .then(() => {
       if (!globalThis.Terminal) throw new Error("xterm 加载完成但未提供 Terminal");

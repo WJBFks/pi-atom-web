@@ -13,14 +13,16 @@ import { useSessionStore } from "../../stores/session.js";
 import { useConversationStore } from "../../stores/conversation.js";
 import { useComposerStore } from "../../stores/composer.js";
 import { useDialogsStore } from "../../stores/dialogs.js";
+import { isCoarsePointer } from "../../stores/settings.js";
 import { postAction } from "../../api/actions.js";
-import { icon } from "../../icons.js";
+import { icon, thinkingIcon } from "../../icons.js";
 import { writeClipboard } from "../../clipboard.js";
 import ActivityBar from "./ActivityBar.js";
 import CommandMenu from "./CommandMenu.js";
-import ModelPicker from "./ModelPicker.js";
-import ThinkingPicker from "./ThinkingPicker.js";
+import AttachMenu from "./AttachMenu.js";
+import ModelThinkingPicker from "./ModelThinkingPicker.js";
 import SessionStatus from "../status/SessionStatus.js";
+import ContextRing from "./ContextRing.js";
 import { PreviewImage } from "../conversation/MessageItem.js";
 import { readImageFiles } from "./image-files.js";
 
@@ -112,7 +114,7 @@ export default defineComponent({
       focus();
     };
     const setPicker = (value) => {
-      if (session.busy) return;
+      // 忙碌时也允许打开（用户 2026-09-25：「支持在忙碌时/处理中切换模型和思考级别」）。
       const opening = composer.picker !== value;
       composer.togglePicker(value, session.modelOptions);
       if (value === "model" && opening) {
@@ -125,6 +127,25 @@ export default defineComponent({
             ? providers[0]
             : null);
       }
+    };
+    // 添加菜单的出口（用户 2026-09-25 选定四项）。除「添加图片」直接开文件选择器，
+    // 其余三项都是**插入命令草稿 + 聚焦**：`/compact ` 末尾留一个空格就是为了让斜杠命令
+    // 菜单不跟着弹出来（`commandQuery` 的 `^\/(\S*)$` 匹配不上带空格的草稿）。
+    const pickAttach = (key) => {
+      composer.picker = null;
+      if (key === "image") {
+        imageInput.value?.click();
+        return;
+      }
+      composer.setDraft(
+        key === "commands"
+          ? "/"
+          : key === "skills"
+            ? "/skill:"
+            : "/compact ",
+      );
+      resize();
+      focus();
     };
     const request = async (action) => {
       const controller = new AbortController();
@@ -143,8 +164,25 @@ export default defineComponent({
     const report = (error) => {
       if (alive && error?.name !== "AbortError") props.onError?.(error);
     };
+    // 模型与思考级别的合并按钮（用户 2026-09-25：两个按钮合成一个）。
+    // Pi 要求空闲才能切（后端 select_model / select_thinking 非空闲时会报错），所以忙时只把
+    // 选择缓到 composer 里、界面立刻按待生效值显示，等本轮结束（busy 转假）再自动补发。
+    const sameModel = (model) =>
+      !!model &&
+      session.selectedModel?.provider === model.provider &&
+      session.selectedModel?.id === model.id;
     const selectModel = async (model) => {
-      if (session.busy) return;
+      if (session.busy) {
+        composer.pendingModel = sameModel(model) ? null : model;
+        showNotice(
+          sameModel(model)
+            ? "该模型已是当前模型，已取消待切换。"
+            : `处理中，本轮结束后自动切到 ${model.name || model.id}。`,
+        );
+        return true;
+      }
+      if (composer.pendingModel && sameModel(composer.pendingModel))
+        composer.pendingModel = null;
       try {
         await request({
           type: "select_model",
@@ -152,24 +190,71 @@ export default defineComponent({
           provider: model.provider,
           modelId: model.id,
         });
-        if (alive) composer.picker = null;
+        return true;
       } catch (error) {
         report(error);
+        return false;
       }
     };
     const selectThinking = async (level) => {
-      if (session.busy) return;
+      if (session.busy) {
+        // 拖回当前级别 = 取消待切换。
+        composer.pendingThinking = level === session.thinking ? "" : level;
+        return true;
+      }
+      if (composer.pendingThinking === level) composer.pendingThinking = "";
       try {
         await request({
           type: "select_thinking",
           sessionId: session.sessionId,
           level,
         });
-        if (alive) composer.picker = null;
+        return true;
       } catch (error) {
         report(error);
+        return false;
       }
     };
+    // 空闲后补发：模型先发（可选级别跟着模型变），再补思考级别。
+    const flushPending = async () => {
+      const model = composer.pendingModel;
+      const level = composer.pendingThinking;
+      if (session.busy || (!model && !level)) return;
+      composer.pendingModel = null;
+      composer.pendingThinking = "";
+      if (model && !(await selectModel(model))) return;
+      // 新模型不支持刚才选的级别时静丢掉：模型已经切成，不该为一个级别弹错。
+      if (
+        level &&
+        (!session.thinkingLevels.length ||
+          session.thinkingLevels.includes(level))
+      )
+        await selectThinking(level);
+    };
+    watch(
+      () => session.busy,
+      (busy, was) => {
+        if (was && !busy) flushPending();
+      },
+    );
+    // 按钮与面板上显示的都是「待生效值优先」，选完就能看到结果。
+    const thinkingLevel = computed(
+      () => composer.pendingThinking || session.thinking || "off",
+    );
+    const effectiveModelName = computed(() => {
+      const pending = composer.pendingModel;
+      if (!pending) return modelName.value;
+      return (
+        session.modelOptions.find(
+          (item) =>
+            item.provider === pending.provider && item.id === pending.id,
+        )?.name || modelName.value
+      );
+    });
+    // 有排队项时按钮要看得出来「这是待生效的选择」，不是已经切好了。
+    const pendingSelection = computed(
+      () => Boolean(composer.pendingModel || composer.pendingThinking),
+    );
     const showNotice = (value) => {
       notice.value = value;
       clearTimeout(noticeTimer);
@@ -185,7 +270,11 @@ export default defineComponent({
         return true;
       }
       composer.clear();
-      if (match[1] === "model") setPicker("model");
+      if (match[1] === "model") {
+        setPicker("model");
+        // /model 是要换模型，直接落在供应方 + 模型那一页。
+        composer.pickerTab = "model";
+      }
       if (match[1] === "session") {
         composer.picker = null;
         composer.popover = "status-session";
@@ -305,15 +394,29 @@ export default defineComponent({
           return;
         }
       }
-      if (event.key === "Enter" && !event.shiftKey) {
+      // 手机端（触屏）的回车一律当作换行，只有点发送按钮才发送（用户 2026-09-25）：
+      // 软键盘上的回车没有「发送」的直觉，输入法的回车更常常是用来提交候选词的。
+      // 这里**故意不 preventDefault**：textarea 的原生行为就是在光标处插入换行，
+      // onInput 会把草稿与高度一起跟上。
+      // 判据用 pointer:coarse 而不是宽度断点：把桌面窗口拖窄只是窄屏，键盘行为不该跟着变。
+      // 上面斜杠命令菜单里的 Enter 仍然是补全（补全不是发送，且菜单项本身可点）。
+      if (
+        event.key === "Enter" &&
+        !event.shiftKey &&
+        !isCoarsePointer()
+      ) {
         event.preventDefault();
         submit();
       }
     };
     const outside = (event) => {
+      // 加号按钮与它的菜单必须一起排除：`pointerdown` 比 `click` 先到，
+      // 不排掉按钮的话「点按钮 = 先被外部关掉、再被 onClick 重新开」，永远关不上。
       if (
         !event.target.closest(".setting-picker") &&
-        !event.target.closest(".composer-setting")
+        !event.target.closest(".composer-setting") &&
+        !event.target.closest(".attach-menu") &&
+        !event.target.closest("#attach-button")
       )
         composer.picker = null;
     };
@@ -507,41 +610,44 @@ export default defineComponent({
                   },
                 }),
                 h("button", {
-                  id: "image-button",
+                  id: "attach-button",
                   type: "button",
                   class: "composer-icon",
-                  "aria-label": "添加图片",
-                  title: "添加图片",
-                  disabled: composer.sending,
-                  onClick: () => imageInput.value?.click(),
-                }, icon("image")),
+                  "aria-label": "添加",
+                  title: "添加图片 / 命令 / 技能 / 压缩",
+                  "aria-haspopup": "menu",
+                  "aria-expanded": String(composer.picker === "attach"),
+                  onClick: () => {
+                    // 草稿里正有斜杠查询时先把命令菜单收起，两个弹层同位置会叠在一起。
+                    if (commandVisible.value) composer.dismissCommands();
+                    composer.togglePicker("attach");
+                  },
+                }, icon("plus")),
               ]),
               h("div", { class: "compose-right" }, [
+                // 模型名左侧的上下文占比环（点击看当前/最大/占比与压缩按钮）。
+                h(ContextRing, { token: props.token, onError: report }),
+                // 模型名 + 思考级别仪表图标合成一个按钮（用户 2026-09-25）：图标就是当前级别的仪表盘。
+                // 不再因为忙碌而禁用：忙时的选择会排队到本轮结束。
                 h(
                   "button",
                   {
                     id: "model-button",
                     type: "button",
-                    class: "composer-setting",
+                    class: ["composer-setting", { pending: pendingSelection.value }],
+                    "aria-label": "选择模型与思考级别",
                     "aria-expanded": String(composer.picker === "model"),
-                    disabled: session.busy,
+                    title: `${effectiveModelName.value} · 思考级别 ${thinkingLevel.value}`,
                     onClick: () => setPicker("model"),
                   },
-                  modelName.value,
+                  [
+                    h("span", { class: "setting-name" }, effectiveModelName.value),
+                    thinkingIcon(thinkingLevel.value),
+                  ],
                 ),
-                h(
-                  "button",
-                  {
-                    id: "thinking-button",
-                    type: "button",
-                    class: "composer-setting",
-                    "aria-expanded": String(composer.picker === "thinking"),
-                    disabled: session.busy,
-                    onClick: () => setPicker("thinking"),
-                  },
-                  session.thinking || "off",
-                ),
-                session.busy
+                session.busy &&
+                !composer.draft.trim() &&
+                !composer.images.length
                   ? h(
                       "button",
                       {
@@ -556,43 +662,49 @@ export default defineComponent({
                       },
                       icon("stop"),
                     )
-                  : null,
-                h(
-                  "button",
-                  {
-                    type: "submit",
-                    class: "primary",
-                    id: "send",
-                    "aria-label": "发送",
-                    disabled:
-                      (!composer.draft.trim() && !composer.images.length) ||
-                      composer.sending ||
-                      // 被活动组件阻塞时发送按钮同样不可用（与 submit 守卫一致）
-                      dialogs.blocking.length > 0 ||
-                      session.connection !== "connected",
-                  },
-                  icon("send"),
-                ),
+                  : h(
+                      "button",
+                      {
+                        type: "submit",
+                        class: "primary",
+                        id: "send",
+                        "aria-label": session.busy
+                          ? "排队发送（本轮结束后提交）"
+                          : "发送",
+                        disabled:
+                          (!composer.draft.trim() && !composer.images.length) ||
+                          composer.sending ||
+                          // 被活动组件阻塞时发送按钮同样不可用（与 submit 守卫一致）
+                          dialogs.blocking.length > 0 ||
+                          session.connection !== "connected",
+                      },
+                      icon("send"),
+                    ),
               ]),
             ]),
             composer.picker === "model"
-              ? h(ModelPicker, {
+              ? h(ModelThinkingPicker, {
+                  modelName: effectiveModelName.value,
+                  levels: session.thinkingLevels,
+                  thinking: session.thinking,
+                  pendingThinking: composer.pendingThinking,
+                  busy: session.busy,
                   models: session.modelOptions,
                   selected: session.selectedModel,
                   provider: composer.provider,
                   query: composer.modelQuery,
-                  busy: session.busy,
+                  tab: composer.pickerTab,
+                  chooseTab: (value) => (composer.pickerTab = value),
                   chooseProvider: (value) => composer.selectProvider(value),
                   updateQuery: (value) => (composer.modelQuery = value),
                   chooseModel: selectModel,
+                  chooseThinking: selectThinking,
                 })
               : null,
-            composer.picker === "thinking"
-              ? h(ThinkingPicker, {
-                  levels: session.thinkingLevels,
-                  selected: session.thinking,
-                  busy: session.busy,
-                  chooseLevel: selectThinking,
+            composer.picker === "attach"
+              ? h(AttachMenu, {
+                  imagesDisabled: composer.sending,
+                  pick: pickAttach,
                 })
               : null,
           ],

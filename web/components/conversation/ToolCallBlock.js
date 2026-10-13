@@ -1,11 +1,17 @@
 import { computed, defineComponent, h, onUnmounted, watch } from "vue";
 import { writeClipboard } from "../../clipboard.js";
 import { icon } from "../../icons.js";
+import {
+  toolIconName,
+  toolProfileLabel,
+  toolProfileSummary,
+} from "../../packages/tool-profiles.js";
 import { codeBlock } from "../../markdown.js";
 import { isAbortNotice } from "./abort-notice.js";
 import { useConversationClock } from "../../stores/conversation.js";
 import MarkdownContent from "./MarkdownContent.js";
 import DisclosureBlock from "./DisclosureBlock.js";
+import { annotateIntraLine } from "./wordDiff.js";
 
 const text = (value) =>
   typeof value === "string" ? value : JSON.stringify(value ?? "", null, 2);
@@ -288,14 +294,32 @@ export function splitToolNotices(value) {
   return { content: text.slice(0, marker), notices };
 }
 
-const diffLine = (kind, marker, line, key, lineNumber = "") =>
+const diffLine = (kind, marker, line, key, lineNumber = "", segments = null) =>
   h("div", { class: ["diff-line", `diff-${kind}`], key }, [
     // 行号与标记放在同一个 sticky gutter 里：横向滚动时固定在左侧
     h("span", { class: "diff-gutter" }, [
       h("span", { class: "diff-marker" }, marker),
       h("span", { class: "diff-number" }, lineNumber),
     ]),
-    h("span", { class: "diff-text" }, line === "" ? " " : line),
+    h(
+      "span",
+      { class: "diff-text" },
+      // 行内高亮：变更段包一层 .diff-word（样式用更重的底色），其余原样。
+      segments
+        ? segments.map((segment, position) =>
+            h(
+              "span",
+              {
+                key: position,
+                class: segment.changed ? "diff-word" : null,
+              },
+              segment.text,
+            ),
+          )
+        : line === ""
+          ? " "
+          : line,
+    ),
   ]);
 
 const lineMarker = (kind) =>
@@ -312,16 +336,51 @@ const TOOL_ICONS = {
   find: "filter",
   ls: "folder",
 };
-// 标题里显示的动词（仅本地化 pi 的三个文件工具，其它保持工具原名）
+// 标题里显示的动词（仅本地化 pi 的三个文件工具，其它保持工具原名）。
+// 第三方 package 工具的名字不写在这里，走 `web/packages/tool-profiles.js` 的档案（§21）。
 const TOOL_LABELS = { read: "读取", write: "写入", edit: "编辑" };
 export function toolLabel(name) {
   const key = String(name || "").toLowerCase();
-  return TOOL_LABELS[key] || String(name || "");
+  return toolProfileLabel(key) || TOOL_LABELS[key] || String(name || "");
 }
 
 export function toolIcon(name, skill = false) {
   if (skill) return "spark";
+  // package 档案自带的图标优先（图标定义在包目录里，见 §21）
+  const custom = toolIconName(name);
+  if (custom) return custom;
   return TOOL_ICONS[String(name || "").toLowerCase()] || "box";
+}
+
+// 工具状态行的四种文案（read/write/edit 共用；纯函数，给单测留余地）。
+// 失败不能还写「成功」：宿主把失败标在 toolResult.isError，这里必须分出来。
+export function stateLineText(verb, state) {
+  if (state === "failed") return `${verb}失败`;
+  if (state === "aborted") return `${verb}已中止`;
+  return `${state === "running" ? "正在" : "成功"}${verb}`;
+}
+
+/**
+ * 折叠态摘要：工具卡自己没有别的摘要来源，所以拿**工具输出**当摘要；
+ * 报错（isError）时输出就是报错信息，天然就是「报错状态的摘要」。
+ * 摘要口径与思考块/压缩块一致：连续空白（含换行）压成单个空格，只占一行。
+ * 没结果（运行中）时看 partialResult；都拿不到就不编摘要。
+ * 超长截断（CSS 本来也会折成一行 + 省略号，但一行里塞几百 KB 文本会拖垫布局）。
+ */
+const MAX_PREVIEW = 300;
+export function toolSummary(result, running) {
+  const source = result
+    ? resultText(result)
+    : typeof running?.partialResult === "string"
+      ? running.partialResult
+      : "";
+  const preview = String(source ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!preview) return "";
+  return preview.length > MAX_PREVIEW
+    ? `${preview.slice(0, MAX_PREVIEW)}…`
+    : preview;
 }
 
 export default defineComponent({
@@ -362,15 +421,34 @@ export default defineComponent({
         ? args.value.content
         : null,
     );
-    // write 的写入状态：结果已回来即成功，否则视为正在写入
-    const writeStatus = computed(() => (props.result ? "done" : "running"));
+    // 工具结果状态：没回来=running；isError=失败（中止是宿主特有的 isError，单独措词）。
+    const toolState = computed(() => {
+      if (!props.result) return "running";
+      if (!props.result.isError) return "done";
+      return isAbortedResult(props.result) ? "aborted" : "failed";
+    });
+    const failed = computed(
+      () => toolState.value === "failed" || toolState.value === "aborted",
+    );
+    const failure = computed(
+      () =>
+        toolState.value === "failed" ? resultText(props.result).trim() : "",
+    );
+    // 折叠态摘要（工具输出 / 报错信息，空白压平）。package 档案可自带摘要（返回空则走通用）。
+    const summary = computed(
+      () =>
+        toolProfileSummary(name.value, args.value) ||
+        toolSummary(props.result, props.running),
+    );
     const hunks = computed(() =>
       String(name.value).toLowerCase() === "edit" ? editHunks(args.value) : [],
     );
     // 结果里的真实 diff（带文件行号）优先于参数推算的变更
     const diffLines = computed(() => {
       const diff = props.result?.details?.diff;
-      return typeof diff === "string" && diff ? parseToolDiff(diff) : [];
+      return typeof diff === "string" && diff
+        ? annotateIntraLine(parseToolDiff(diff))
+        : [];
     });
     // read 的结果是文件内容（按路径语言高亮，行号从 offset 开始）
     const readOutput = computed(() =>
@@ -442,13 +520,29 @@ export default defineComponent({
     // 专门视图：write 的写入内容 / edit 的变更；原始 JSON 收进二级折叠。
     // read/bash 不做这一套：它们的入参很小（路径/命令），**INPUT 只展示 JSON**，
     // 文件内容与终端输出都归到 OUTPUT。
-    // 工具状态行（write/read/edit 共用）：状态词 + 路径 chip（hover 出复制）+ 可选后缀
+    // 工具状态行（write/read/edit 共用）：状态词 + 路径 chip（hover 出复制）+ 可选后缀。
+    // 失败时后缀（+N -M / 行范围）没有意义就不摆，报错正文全部交给下方的 `.tool-failure` 块
+    //（用户 2026-09-23：右边再挤一份报错摘要是重复信息，长报错还会在右侧竖着排一大）。
     const stateLine = (verb, suffix) =>
-      h("div", { class: "tool-state-line" }, [
-        h("span", null, `${writeStatus.value === "running" ? "正在" : "成功"}${verb}`),
+      h("div", {
+        class: ["tool-state-line", failed.value && "tool-state-failed"],
+      }, [
+        h("span", null, stateLineText(verb, toolState.value)),
         h(
           "code",
-          { class: "path-chip", title: filePath.value },
+          { class: "path-chip", title: filePath.value,
+            role: "button", tabindex: 0, "aria-label": "打开工作区文件",
+            onClick: (event) => {
+              if (event.target.closest(".chip-copy")) return;
+              event.stopPropagation();
+              window.dispatchEvent(new CustomEvent("atom-open-file", { detail: { path: filePath.value, line: Number(args.value?.offset) || 1 } }));
+            },
+            onKeydown: (event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault(); event.stopPropagation();
+              window.dispatchEvent(new CustomEvent("atom-open-file", { detail: { path: filePath.value, line: Number(args.value?.offset) || 1 } }));
+            },
+          },
           [filePath.value],
           filePath.value
             ? h(
@@ -458,7 +552,7 @@ export default defineComponent({
               )
             : null,
         ),
-        suffix || null,
+        failed.value ? null : suffix || null,
       ]);
     // read 的后缀：从 N 行开始，共 M 行（缺省项省略）
     const readRange = () => {
@@ -485,6 +579,7 @@ export default defineComponent({
       if (writeContent.value != null)
         return h("section", { class: "tool-io-section", onClick: copyInput }, [
           stateLine("写入"),
+          failureNotice(),
           h("div", {
             innerHTML: codeBlock(
               writeContent.value,
@@ -492,10 +587,11 @@ export default defineComponent({
             ),
           }),
         ]);
-      // 结果已经回来时用宿主算好的 diff（带行号）
+      // 结果已经回来时用宿主算好的 diff（带行号，行内还有词级高亮）
       if (diffLines.value.length)
         return h("section", { class: "tool-io-section" }, [
           stateLine("编辑", diffStat()),
+          failureNotice(),
           h("div", { class: "diff-block" }, [
             h(
               "div",
@@ -507,6 +603,7 @@ export default defineComponent({
                   line.content,
                   index,
                   line.lineNumber,
+                  line.segments,
                 ),
               ),
             ),
@@ -515,25 +612,49 @@ export default defineComponent({
       if (hunks.value.length)
         return h("section", { class: "tool-io-section" }, [
           stateLine("编辑", diffStat()),
+          failureNotice(),
           h("div", { class: "diff-block" }, [
             h(
               "div",
               { class: "diff-scroll" },
+              // 只有参数时拿不到行号，但同一对 oldText/newText 的行数相等时仍能逐行
+              // 配对出词级变更（annotateIntraLine），流式阶段就能看到改了哪几个字段。
               hunks.value.map((hunk, index) =>
-                h("div", { class: "diff-hunk", key: index }, [
-                  ...hunk.oldLines.map((line, position) =>
-                    diffLine("removed", "-", line, `o${position}`),
+                h(
+                  "div",
+                  { class: "diff-hunk", key: index },
+                  annotateIntraLine([
+                    ...hunk.oldLines.map((line) => ({
+                      kind: "removed",
+                      content: line,
+                    })),
+                    ...hunk.newLines.map((line) => ({
+                      kind: "added",
+                      content: line,
+                    })),
+                  ]).map((line, position) =>
+                    diffLine(
+                      line.kind,
+                      lineMarker(line.kind),
+                      line.content,
+                      position,
+                      "",
+                      line.segments,
+                    ),
                   ),
-                  ...hunk.newLines.map((line, position) =>
-                    diffLine("added", "+", line, `n${position}`),
-                  ),
-                ]),
+                ),
               ),
             ),
           ]),
         ]);
       return null;
     };
+    // 报错块：只要有报错正文就整块展示（不像早期那样短错只进状态行），
+    // 因为状态行已经不再放报错摘要了。
+    const failureNotice = () =>
+      failure.value
+        ? h("div", { class: "tool-failure" }, h("pre", null, failure.value))
+        : null;
     const rawInput = () =>
       args.value === undefined
         ? null
@@ -605,6 +726,13 @@ export default defineComponent({
       ]);
     };
     const output = () => {
+      // read 失败：报错在结果文本里（readOutput 已排除 isError），但状态行不能不告而别，
+      // 否则卡片里只剩一个红图标，看不出“读取失败”与失败原因。
+      if (String(name.value).toLowerCase() === "read" && failure.value)
+        return h("section", { class: "tool-io-section" }, [
+          stateLine("读取"),
+          failureNotice(),
+        ]);
       // read：按路径语言高亮展示文件内容（行号从 offset 开始；工具提示语不进代码块）
       // read：状态行（正在/成功读取 + 路径 + 范围）+ 代码块 + 工具提示语
       if (readOutput.value != null) {
@@ -695,6 +823,12 @@ export default defineComponent({
                 h("span", { class: "disclosure-separator" }, "·"),
               (skill.value || titleArgument.value) &&
                 h("span", skill.value || titleArgument.value),
+              // 摘要：输出（报错时就是报错信息）。展开时由
+              // `.disclosure-block[open]>summary .disclosure-preview` 自动藏掉。
+              summary.value &&
+                h("span", { class: "disclosure-separator" }, "·"),
+              summary.value &&
+                h("span", { class: "disclosure-preview" }, summary.value),
             ]),
             h(
               "span",

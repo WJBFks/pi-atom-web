@@ -20,6 +20,8 @@ import { icon } from "../icons.js";
 
 const ContextView = defineAsyncComponent(() => import("./ContextView.js"));
 const SettingsView = defineAsyncComponent(() => import("./SettingsView.js"));
+import SidePanelHost from "../components/workspace/SidePanelHost.js";
+import { openSidePanel } from "../components/workspace/panel-registry.js";
 
 // 对话与轨迹共用同一个消息区（只是渲染方式不同），切换 tab 时保持挂载，避免丢失滚动位置。
 const FEED_VIEWS = ["chat", "trace"];
@@ -37,8 +39,11 @@ export default defineComponent({
     const nameDraft = ref("");
     const nameInput = ref();
     composer.initView(settings.defaultView);
-    let observer, scrollbarObserver;
+    let observer, scrollbarObserver, cleanupOpenFile;
     onMounted(() => {
+      const onOpenFile = (event) => { const detail = event.detail || {}; if (detail.path) openSidePanel("workspace", detail); };
+      window.addEventListener("atom-open-file", onOpenFile);
+      cleanupOpenFile = () => window.removeEventListener("atom-open-file", onOpenFile);
       const dock = document.querySelector(".compose-wrap");
       observer = new ResizeObserver(() => {
         document.documentElement.style.setProperty(
@@ -62,8 +67,19 @@ export default defineComponent({
         scrollbarObserver.observe(scroll, { box: "content-box" });
         syncScrollbar();
       }
+      // 后台标签页里 rAF 不跑（跟随滚动的补帧依赖它），所以切回来时如果本来贴在底部，
+      // 主动跟一次底，否则会停在后台前的位置。
+      document.addEventListener("visibilitychange", onVisibility);
     });
+    // 后台期间 rAF 不跑（跟随滚动的补帧靠它），切回来时若本来贴在底部就主动跟一次，
+    // 避免停在后台前的位置。
+    const onVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      if (atBottom.value && FEED_VIEWS.includes(composer.view)) bottom();
+    };
     onUnmounted(() => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      cleanupOpenFile?.();
       observer?.disconnect();
       scrollbarObserver?.disconnect();
       document.documentElement.style.removeProperty("--compose-height");
@@ -72,14 +88,6 @@ export default defineComponent({
     const bottom = () => {
       conversationFeed.value?.scrollToBottom();
     };
-    const activity = () =>
-      session.connection !== "connected"
-        ? "连接已断开"
-        : session.busy
-          ? `正在生成${session.pending ? " · 有排队消息" : ""}`
-          : session.pending
-            ? "消息已排队"
-            : "已同步";
     const startRename = () => {
       renaming.value = true;
       nameDraft.value = session.name === "未命名会话" ? "" : session.name;
@@ -136,10 +144,10 @@ export default defineComponent({
             },
             [icon("edit")],
           ),
-        h("span", { id: "activity" }, activity()),
       ]);
     return () =>
-      h("div", { class: "layout" }, [
+      // 设置页要把上下安全区涂成灰色并标出名字（那里能调这两个值，不涂色看不出边界）。
+      h("div", { class: ["layout", composer.view === "settings" && "show-safe-area"] }, [
         h("main", [
           h("div", { class: "toolbar" }, [
             head(),
@@ -147,6 +155,11 @@ export default defineComponent({
               view: composer.view,
               onSelect: (view) => composer.setView(view),
             }),
+            h("button", {
+              type: "button", class: "icon-button workspace-toggle", "aria-label": "工作区", title: "工作区",
+              style: { position: "absolute", right: "var(--workspace-button-right, 8px)", top: "8px", display: "inline-flex", alignItems: "center", justifyContent: "center", width: "32px", height: "32px" },
+              onClick: () => openSidePanel("workspace"),
+            }, icon("workspace")),
           ]),
           h("div", { class: "view-panes" }, [
             // 消息区始终保留在布局里（只切 visibility），否则切回来时整段 transcript
@@ -199,6 +212,7 @@ export default defineComponent({
               [h(SettingsView)],
             ),
           ]),
+          h(SidePanelHost, { token: props.token, sessionId: session.sessionId, onError: props.onError }),
           !atBottom.value && FEED_VIEWS.includes(composer.view)
             ? h(
                 "button",

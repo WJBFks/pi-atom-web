@@ -12,8 +12,9 @@ import {
 export const THEME_STORAGE_KEY = "atom-theme";
 export const SETTINGS_STORAGE_KEY = "atom-settings";
 export const THEMES = ["light", "dark", "system"];
-// 执行轨迹将来是独立页面（tab 暂不可选中），因此暂不作为默认视图。
-export const DEFAULT_VIEWS = ["chat", "context"];
+// 可选的默认视图。执行轨迹与上下文页只是暂时隐藏（tab 与设置项都不显示，视图代码保留），
+// 接回前不放进这里，否则旧记忆里存的 defaultView 会把用户带进没有入口的页面。
+export const DEFAULT_VIEWS = ["chat"];
 // 安全区：为内容留出的顶部/底部距离（px），用于避开手机刘海、系统状态栏与浏览器工具栏。
 export const MAX_SAFE_AREA = 240;
 export const DEFAULT_SETTINGS = {

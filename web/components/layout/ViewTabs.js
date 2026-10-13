@@ -1,7 +1,8 @@
 import { defineComponent, h } from "vue";
 
-// 左上角的页面 tab（标题行下方）。对话与上下文复用同一个消息区宿主，设置是独立页面；
-// 执行轨迹将来是独立页面，在完成前保持可见但不可选中。
+// 左上角的页面 tab（标题行下方）。当前只显示对话与设置。
+// 执行轨迹与上下文页暂时隐藏（`hidden: true`）：视图代码与页面宿主都保留，
+// 将来各自改为独立页面后去掉 hidden 即可接回，见 AGENTS.md「待办」。
 export const VIEW_TABS = [
   { id: "chat", label: "对话", panel: "view-panel-feed" },
   {
@@ -9,16 +10,20 @@ export const VIEW_TABS = [
     label: "轨迹",
     panel: "view-panel-feed",
     disabled: true,
-    hint: "执行轨迹将改为独立页面，正在开发中",
+    hidden: true,
+    hint: "执行轨迹将改为独立页面",
   },
-  { id: "context", label: "上下文", panel: "view-panel-context" },
+  { id: "context", label: "上下文", panel: "view-panel-context", hidden: true },
   { id: "settings", label: "设置", panel: "view-panel-settings" },
 ];
+
+// 页面上真正渲染出来的 tab：暂时隐藏的条目既不显示，也不参与键盘切换。
+export const VISIBLE_TABS = VIEW_TABS.filter((tab) => !tab.hidden);
 
 // 纯函数：tablist 的键盘移动（左右循环、Home/End，跳过不可选中的 tab），
 // 目标与当前相同时返回 null。
 export function nextTab(view, key) {
-  const enabled = VIEW_TABS.filter((tab) => !tab.disabled);
+  const enabled = VISIBLE_TABS.filter((tab) => !tab.disabled);
   const index = enabled.findIndex((tab) => tab.id === view);
   if (index < 0) return null;
   const move = (target) => {
@@ -55,7 +60,7 @@ export default defineComponent({
           "aria-label": "会话页面",
           onKeydown,
         },
-        VIEW_TABS.map((tab) =>
+        VISIBLE_TABS.map((tab) =>
           h(
             "button",
             {

@@ -3,10 +3,12 @@ import { AgentSession, ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
+import { readFileSync } from "node:fs";
 import { createPackageCompatibilityRegistry } from "./packages/registry.ts";
 import { bridgeDialogs } from "./dialogs.ts";
 import { startServer } from "./server.ts";
 import { buildAgentResources } from "./agent-resources.ts";
+import { createGenerationTracker } from "./generation-timings.ts";
 import { createThinkingTracker } from "./thinking-timings.ts";
 import { normalizeRunningTool } from "./tool-events.ts";
 import { statusNoteFor } from "./status-note.ts";
@@ -19,10 +21,37 @@ import { createSessionStateStore } from "./session-state.ts";
 import {
   installPromptQueueRuntime,
   promptQueueSnapshot,
+  steeringSignature,
 } from "./prompt-queue.ts";
 import { installSessionTreeRuntime } from "./session-tree.ts";
+import {
+  attachGateway,
+  autoServeMode,
+  deriveSessionToken,
+  forgetWebSession,
+  publicUrl,
+  readWebConfig,
+  rememberWebSession,
+  rotateTokenKey,
+  webTokenKeyPath,
+  writeWebConfig,
+} from "./gateway-client.ts";
 
 const RELOAD_HANDOFF = Symbol.for("pi-atom-web.reload-handoff");
+// 局域网模式的主机名（`/web-wlan` 与它的自动恢复共用同一个字面量）。
+const LAN_HOST = "0.0.0.0";
+// 扩展自身版本：随快照下发给页面在「设置 → 关于」展示（用户 2026-09-25 新增）。
+// 只读一次（启动时），读不到就下发空串，页面显示「未知」。版本改了要重启扩展才会变。
+const EXTENSION_VERSION = (() => {
+  try {
+    const raw = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    return typeof raw?.version === "string" ? raw.version.slice(0, 64) : "";
+  } catch {
+    return "";
+  }
+})();
 const promptQueues = installPromptQueueRuntime(AgentSession);
 const sessionTree = installSessionTreeRuntime(AgentSession);
 import {
@@ -78,6 +107,9 @@ export default function atomWeb(pi) {
   let context,
     server,
     starting,
+    // 固定端口网关上的本会话登记（`{id, port, lan, stop}`）；拉不起网关时为 undefined，
+    // 那时退回以前的随机端口直连地址。
+    gateway,
     liveMessage = null,
     liveRunId = null,
     publishTimer,
@@ -98,7 +130,64 @@ export default function atomWeb(pi) {
   // 本轮任务真正开始的时刻（prompt 被宿主接管那一刻），**跨越整轮**：
   // 期间的工具调用、多轮往返、甚至被活动组件阻塞都算在同一轮里，
   // 只在整轮结束（agent_settled）时清空。前端用它算「处理时间 = 现在 − 它」。
+  // 它只是 `turnClocks` 队首的镜像（协议与前端不感知排队，仍拿一个值）。
   let processingStartedAt = null;
+  /**
+   * **每一条用户输入一个计时槽（FIFO）**。不能用一个全局起点：排队会破坏
+   * 「一轮结清再开下一轮」的假设 —— pi 在 `agent_end` 之后立即摧下一条排队的用户消息，
+   * 而上一轮的 `agent_settled` 可能赶到下一轮已经开始之后才到。只用一个格子时：
+   * 中间那些轮整轮没有「已完成（时长）」，最后一条却拿到第一条的起点
+   * （实测把只跑了 18 分钟的一轮结算成 26 分钟）。
+   * 起表只认 `message_start(role=user)` 且非引导：它与 `agent_start` 谁先到都无所谓。
+   */
+  const turnClocks = [];
+  function publishProcessingHead() {
+    processingStartedAt = turnClocks.length ? turnClocks[0].startedAt : null;
+  }
+  function beginTurnClock(sessionManager) {
+    turnClocks.push({
+      startedAt: Date.now(),
+      fromIndex: sessionManager.getBranch().length,
+    });
+    // 没等到 settle 就挂了（强杀 / 分支被切）会漏下格子：宁可少一条徽标，也不能一直串位。
+    if (turnClocks.length > 12) turnClocks.shift();
+    publishProcessingHead();
+  }
+  /**
+   * 本段分支里最后一条 assistant（右界 = 下一轮的起点，settle 迟到时下一轮已经在输出）。
+   * strict 模式下段内没输出就返回 null（这条用户消息没起过真正的轮，比如命令消息）。
+   */
+  function turnClockKey(branch, clock, next, strict = true) {
+    const end = next ? Math.min(next.fromIndex, branch.length) : branch.length;
+    let key = null;
+    for (let index = Math.max(0, clock.fromIndex); index < end; index += 1) {
+      const entry = branch[index];
+      if (entry?.type === "message" && entry.message?.role === "assistant")
+        key = `${context.sessionManager.getSessionId()}:branch:${entry.id}`;
+    }
+    return key || (strict ? null : turnProcessingKey(branch));
+  }
+  /**
+   * 一轮结清：弹队首。队首那一段没有输出（命令消息之类）就丢掉再看下一个，
+   * 保证徽标挂在真正刚结束的那一轮上；下标全对不上（切分支/压缩）时退回
+   * 原来的「整条分支尾部」算法，不能整个没徽标。
+   */
+  function settleTurnClock(branch) {
+    let newest = null;
+    while (turnClocks.length) {
+      const clock = turnClocks.shift();
+      newest = clock;
+      const key = turnClockKey(branch, clock, turnClocks[0]);
+      if (key) {
+        publishProcessingHead();
+        return { key, startedAt: clock.startedAt };
+      }
+    }
+    publishProcessingHead();
+    if (!newest) return null;
+    const key = turnClockKey(branch, newest, null, false);
+    return key ? { key, startedAt: newest.startedAt } : null;
+  }
   // 上下文压缩正在进行中（auto / manual）。压缩期间前端显示「正在压缩上下文...」。
   let compacting = false;
   // 本次压缩的起点与它所属的命令记录 id（`/compact` 命令记录）。
@@ -114,6 +203,16 @@ export default function atomWeb(pi) {
   // value = { startedAt, durationMs }。前端据此把「已完成（时长）」贴在**每一轮**的
   // 输出下方（而不是只留一个复用的状态窗），并且落盘，刷新后仍能显示。
   const turnProcessing = new Map();
+  // 自动压缩（`reason: "threshold" | "overflow"`）的耗时：key = branch 里压缩条目的 id，
+  // value = `{ startedAt, durationMs }`。自动压缩没有 `/compact` 命令记录可挂完成行，
+  // 它作为一个中间步骤出现在轮次里，所以耗时挂在压缩条目上、由前端渲染成折叠块标题
+  // 右侧的耗时（与思考 / 工具调用同一形态）。手动 `/compact` 不走这里，照旧是块下方的
+  // 「压缩完成（耗时…）」。落盘，刷新后仍能显示。
+  const completedCompactionTimings = new Map();
+  // 压缩条目的触发原因：key = 压缩 entry 的 id，值 = `"manual" | "threshold" | "overflow"`。
+  // 宿主只在 `session_compact` 事件上给 reason，**落盘的 CompactionEntry 没有这个字段**，
+  // 而前端要靠它分流：手动压缩是页面边界（不进轮次分组），自动压缩算本轮的一步。
+  const completedCompactionReasons = new Map();
 
   /**
    * 本轮最终输出对应的 key：branch 里最后一条 assistant entry 的客户端消息 id。
@@ -219,10 +318,23 @@ export default function atomWeb(pi) {
     if (!pending) return;
     pendingThinkingSettles.delete(liveId);
     if (commitThinkingTimings(historyId, pending.settled))
-      publish(context, { thinkingTimings: Object.fromEntries(completedThinkingTimings) });
+      publish(context, { thinkingTimings: thinkingTimingsPatch() });
   }
   // message_end 没触发（强杀 / 异常）时的兑底：整轮结束时把残留的思考块
   // 直接结算到 branch 末尾的 assistant entry。
+  /**
+   * 发给前端的 thinkingTimings：已结算的（key 用历史消息 id）+ 当前流式消息的实时
+   * 状态（key 用 live id，没有 durationMs 表示仍在想）。浏览器是整体替换这个 map，
+   * 所以两者必须一起发；流式期间不带实时状态的话，正在生成的思考块只能显示 `--`。
+   */
+  function thinkingTimingsPatch() {
+    const patch = Object.fromEntries(completedThinkingTimings);
+    if (liveRunId)
+      for (const [index, timing] of Object.entries(thinkingTracker.streaming()))
+        patch[`${liveRunId}-thinking-${index}`] = timing;
+    return patch;
+  }
+
   function fallbackThinkingTimings(ctx) {
     const leftover = thinkingTracker.finish();
     pendingThinkingSettles.clear();
@@ -231,20 +343,60 @@ export default function atomWeb(pi) {
     if (entry?.type !== "message" || entry.message?.role !== "assistant") return;
     const historyId = `${ctx.sessionManager.getSessionId()}:branch:${entry.id}`;
     if (commitThinkingTimings(historyId, leftover))
-      publish(ctx, { thinkingTimings: Object.fromEntries(completedThinkingTimings) });
+      publish(ctx, { thinkingTimings: thinkingTimingsPatch() });
+  }
+
+  // 生成速度观测（见 generation-timings.ts）：只观测模型吐「正文 + 思考」的过程，
+  // 分母不含空闲 / 工具执行 / 压缩 / 排队，分子不含工具调用参数。
+  const generationTracker = createGenerationTracker();
+  // 会话累计观测（落盘）：平均速度 = generation.tokens / (generation.ms / 1000)。
+  // 没观测到的消息（扩展加载前的历史、被强杀在半路的消息）不计入，宁可少统计
+  // 也不用会被稀释的「会话存活时长」去凑数。
+  let generation = { tokens: 0, ms: 0, messages: 0 };
+  // 正在生成这条消息的实时观测 `{ startedAt, elapsedMs, estimatedTokens }` 或 null。
+  // 随 liveMessage 同一条 patch 发出（message_update 不刷 stats，别把统计挂上去）。
+  let liveGeneration = null;
+
+  /** 结算当前消息的观测并累进会话总量；没有可结算的块时返回 false。 */
+  function settleGeneration(message) {
+    const observed = generationTracker.finish(message);
+    liveGeneration = null;
+    if (!observed) return false;
+    generation = {
+      tokens: generation.tokens + observed.tokens,
+      ms: generation.ms + observed.ms,
+      messages: generation.messages + 1,
+    };
+    persistState();
+    return true;
   }
   const disclosures = new Map();
   let stateStore;
   const packageCompatibilities = createPackageCompatibilityRegistry(pi);
   const displayRecords = [];
+  // 以「引导」方式送达的用户消息签名（FIFO，上限 500）。Pi 落盘的 entry 不带来源标记，
+  // 只能由 Prompt 队列观察推定（见 prompt-queue.ts 的 trackSteering）；
+  // 落盘后刷新/重开会话仍能显示「16:17 · 引导」，但扩展加载之前的历史无法回溯。
+  const steeringDeliveries = [];
+  const MAX_STEERING_DELIVERIES = 500;
+  function noteSteeringDelivery(sessionManager, message) {
+    if (!promptQueues.noteDelivery(sessionManager, message)) return false;
+    steeringDeliveries.push(steeringSignature(message));
+    if (steeringDeliveries.length > MAX_STEERING_DELIVERIES) steeringDeliveries.shift();
+    return true;
+  }
   function persistState() {
     stateStore?.replace({
       schemaVersion: 1,
       toolTimings: Object.fromEntries(completedToolTimings),
-      thinkingTimings: Object.fromEntries(completedThinkingTimings),
+      thinkingTimings: thinkingTimingsPatch(),
       disclosures: Object.fromEntries(disclosures),
       displayRecords,
+      steeringDeliveries,
       turnProcessing: Object.fromEntries(turnProcessing),
+      compactionTimings: Object.fromEntries(completedCompactionTimings),
+      compactionReasons: Object.fromEntries(completedCompactionReasons),
+      generation,
     });
   }
   async function activateState(ctx, preserveDisplayRecords = false) {
@@ -266,8 +418,20 @@ export default function atomWeb(pi) {
     turnProcessing.clear();
     for (const entry of Object.entries(saved.turnProcessing || {}))
       turnProcessing.set(...entry);
+    completedCompactionTimings.clear();
+    for (const entry of Object.entries(saved.compactionTimings || {}))
+      completedCompactionTimings.set(...entry);
+    completedCompactionReasons.clear();
+    for (const entry of Object.entries(saved.compactionReasons || {}))
+      completedCompactionReasons.set(...entry);
+    generation = saved.generation || { tokens: 0, ms: 0, messages: 0 };
+    generationTracker.reset();
+    liveGeneration = null;
     displayRecords.length = 0;
     displayRecords.push(...saved.displayRecords, ...capturedDisplayRecords);
+    steeringDeliveries.length = 0;
+    for (const signature of saved.steeringDeliveries || [])
+      if (typeof signature === "string") steeringDeliveries.push(signature);
     if (capturedDisplayRecords.length) persistState();
   }
   let notificationBridge, dialogs;
@@ -543,8 +707,13 @@ export default function atomWeb(pi) {
       const value = typeof raw === "number" ? raw : Date.parse(raw);
       return Number.isFinite(value) ? value : undefined;
     };
-    // 用户提示词状态行所需的附加字段：时间戳（本地展示 HH:MM + hover 完整时间戳）
-    // 与兄弟分支信息（count > 1 才发，前端据此显示 `< x/y >`）。
+    // 用户提示词状态行所需的附加字段：时间戳（本地展示 HH:MM + hover 完整时间戳）、
+    // 兄弟分支信息（count > 1 才发，前端据此显示 `< x/y >`），以及「引导」标记。
+    // 引导送达的多重集合按 branch 顺序消耗：同一段文本只引导过一次就只标一条，
+    // 不会把后来手动重发的同文本消息也标上。
+    const steeringRemaining = new Map();
+    for (const signature of steeringDeliveries)
+      steeringRemaining.set(signature, (steeringRemaining.get(signature) || 0) + 1);
     const messageExtras = (entry) => {
       const extras = {};
       const timestamp = entryTimestamp(entry);
@@ -559,6 +728,14 @@ export default function atomWeb(pi) {
             prev: index > 0 ? ids[index - 1] : null,
             next: index < ids.length - 1 ? ids[index + 1] : null,
           };
+        const left = steeringRemaining.get(steeringSignature(entry.message)) || 0;
+        if (left > 0) {
+          extras.delivery = "steer";
+          steeringRemaining.set(
+            steeringSignature(entry.message),
+            left - 1,
+          );
+        }
       }
       return extras;
     };
@@ -723,6 +900,14 @@ export default function atomWeb(pi) {
         // 触发它的那条 `/compact` 命令若已完成，完成行跟着块走（渲染在块下方）。
         const tokensBefore = Number(entry.tokensBefore);
         const done = completedByAnchor.get(entry.parentId);
+        // 自动压缩没有完成行，改为把耗时挂在块上（标题右侧），与思考/工具同一形态。
+        // 已有完成行（手动 `/compact`）时不重复给，维持原样。
+        const autoTiming = done ? undefined : completedCompactionTimings.get(entry.id);
+        // 触发原因：优先取 `session_compact` 事件里记下的；扩展当时未加载的旧条目，
+        // 若与一条已完成的 `/compact` 命令记录配对（`done`），也只能是手动压缩。
+        // 两者都没有时不下发该字段，前端保持旧行为（归进分组）。
+        const reason =
+          completedCompactionReasons.get(entry.id) ?? (done ? "manual" : undefined);
         messages.push({
           id: `${namespace}:branch:${entry.id}`,
           sessionId: namespace,
@@ -732,6 +917,10 @@ export default function atomWeb(pi) {
             ? { tokensBefore }
             : {}),
           ...(done ? { compaction: done } : {}),
+          ...(reason ? { compactionReason: reason } : {}),
+          ...(autoTiming && Number.isFinite(autoTiming.durationMs)
+            ? { compactionDurationMs: autoTiming.durationMs }
+            : {}),
         });
       }
       messages.push(
@@ -776,7 +965,8 @@ export default function atomWeb(pi) {
     if (startsImmediately) {
       responseWaitOwnerId = record.message.id;
       responseWaitStartedAt = Date.now();
-      processingStartedAt ||= responseWaitStartedAt;
+      // 整轮计时不在这里起：排队送达的那一轮也得各自计时。统一走「非引导的用户消息
+      // 置起表标记 + agent_start 起表」，一条输入对应一个计时槽，不会多也不会漏。
     }
     publish(context, {
       pendingUserMessages: pendingUserMessages(),
@@ -859,6 +1049,9 @@ export default function atomWeb(pi) {
       activeAt: activeAt || startedAt || Date.now(),
       usage,
       cacheHit: prompt ? usage.cacheRead / prompt : 0,
+      // 生成速度的分子与分母（只含正文与思考）：前端用 tokens / (ms / 1000)。
+      // stats 在协议里是不透明对象，所以这里加字段不需要改 shared/protocol.*。
+      generation: { ...generation },
       workspace: {
         name: basename(context.cwd) || context.cwd,
         id: context.sessionManager.getSessionId(),
@@ -868,6 +1061,33 @@ export default function atomWeb(pi) {
         typeof context.sessionManager.getSessionFile === "function"
           ? context.sessionManager.getSessionFile() || "内存会话"
           : "内存会话",
+    };
+  }
+  // 上下文占用：直接取宿主的 ctx.getContextUsage()（pi 用它自己的估算：最近一次
+  // LLM 用量 + 之后新增内容的估算；刚压缩完还没有新用量时 tokens/percent 为 null）。
+  // 读不到（旧运行时、没有模型、contextWindow <= 0）就返回 null，前端退化成空环。
+  function contextUsage() {
+    const usage = context.getContextUsage?.();
+    if (!usage) return null;
+    const contextWindow = Number(usage.contextWindow);
+    if (!Number.isFinite(contextWindow) || contextWindow <= 0) return null;
+    // 注意：`Number(null)` 是 0，不能直接当数值用 —— 刚压缩完时宿主给的就是 null，
+    // 当成 0 会把环画成 0%（真实进度未知）。
+    const count = (value) =>
+      value === null || value === undefined || !Number.isFinite(Number(value))
+        ? null
+        : Math.max(0, Math.round(Number(value)));
+    const rawPercent = usage.percent;
+    const percent =
+      rawPercent === null ||
+      rawPercent === undefined ||
+      !Number.isFinite(Number(rawPercent))
+        ? null
+        : Math.min(Math.max(Number(rawPercent), 0), 100);
+    return {
+      tokens: count(usage.tokens),
+      contextWindow: Math.round(contextWindow),
+      percent,
     };
   }
   function modelOptions() {
@@ -894,6 +1114,9 @@ export default function atomWeb(pi) {
       schemaVersion: 1,
       sessionId: context.sessionManager.getSessionId(),
       instanceId,
+      extensionVersion: EXTENSION_VERSION,
+      // 网关端口配置（设置页「会话 → 网关端口」读写，改完下一次 /web 生效）。
+      webConfig: webConfigSnapshot(),
       name: pi.getSessionName() || "未命名会话",
       cwd: context.cwd,
       model: context.model
@@ -918,6 +1141,7 @@ export default function atomWeb(pi) {
         getCommands: () => pi.getCommands(),
       }),
       stats: sessionStats(),
+      contextUsage: contextUsage(),
       ...windowedMessages(),
       historyRevision,
       pendingUserMessages: pendingUserMessages(),
@@ -925,12 +1149,13 @@ export default function atomWeb(pi) {
       processingStartedAt,
       compacting,
       restarting,
+      liveGeneration,
       turnProcessing: Object.fromEntries(turnProcessing),
       requests: dialogs?.list() || [],
       liveMessage,
       tools: [...runningTools.values()],
       toolTimings: Object.fromEntries(completedToolTimings),
-      thinkingTimings: Object.fromEntries(completedThinkingTimings),
+      thinkingTimings: thinkingTimingsPatch(),
       disclosures: Object.fromEntries(disclosures),
     };
     // A second client's snapshot must not consume changes queued for existing clients.
@@ -992,7 +1217,11 @@ export default function atomWeb(pi) {
           Object.assign(refreshed, windowedMessages());
           refreshed.pendingUserMessages = pendingUserMessages();
         }
-        if (statsDirty) refreshed.stats = sessionStats();
+        if (statsDirty) {
+          refreshed.stats = sessionStats();
+          // 上下文占用只在有 LLM 用量变化时才会变，跟 stats 同一时机刷新。
+          refreshed.contextUsage = contextUsage();
+        }
         historyDirty = false;
         statsDirty = false;
         for (const [key, value] of Object.entries(refreshed)) {
@@ -1171,11 +1400,16 @@ export default function atomWeb(pi) {
       });
       return { queued: true, count: chunk.length };
     }
+    // 设置页改 Web 设置：端口下一次 /web 才生效；固定凭证开关会当场换凭证。
+    if (input.type === "configure_web") return await configureWeb(input);
+    // 换本机密钥：所有会话的固定凭证一起换代。
+    if (input.type === "rotate_web_key") return await rotateWebKey();
     if (input.type === "abort") {
       context.abort();
       responseWaitOwnerId = null;
       responseWaitStartedAt = null;
-      publish(context, { responseWaitStartedAt });
+      settleGeneration();
+      publish(context, { responseWaitStartedAt, liveGeneration });
       return;
     }
     // 用户提示词状态行：编辑重发（重开该轮，产生兄弟分支）与分支切换。
@@ -1362,6 +1596,8 @@ export default function atomWeb(pi) {
     if (connection) attachNotifications();
     liveMessage = null;
     liveRunId = null;
+    generationTracker.reset();
+    liveGeneration = null;
     pendingLiveLinks.clear();
     completedLiveIds.clear();
     runningTools.clear();
@@ -1369,13 +1605,16 @@ export default function atomWeb(pi) {
     pendingUserRecords.length = 0;
     responseWaitOwnerId = null;
     responseWaitStartedAt = null;
+    turnClocks.length = 0;
+    publishProcessingHead();
     publish(
       ctx,
       {
         liveMessage,
+        liveGeneration,
         tools: [],
         toolTimings: Object.fromEntries(completedToolTimings),
-        thinkingTimings: Object.fromEntries(completedThinkingTimings),
+        thinkingTimings: thinkingTimingsPatch(),
         disclosures: Object.fromEntries(disclosures),
         pendingUserMessages: [],
         responseWaitStartedAt,
@@ -1383,13 +1622,26 @@ export default function atomWeb(pi) {
       },
       { history: true, stats: true },
     );
-    if (!connection) return;
+    if (!connection) {
+      // 不是 /reload 交接，但上次这个会话显式开着 Web —— 自己接回来（远程浏览器靠这一步）
+      await autoServeWeb(ctx);
+      return;
+    }
     delete globalThis[RELOAD_HANDOFF];
     try {
-      starting = startServer({ snapshot, action, connection }).then((value) => {
+      starting = startServer({
+        snapshot,
+        action,
+        workspaceContext: () => ({ sessionId: context.sessionManager.getSessionId(), cwd: context.cwd }),
+        // 固定凭证开着就重新派生（与交接来的值相等，地址仍不变）；关着就沿用交接的随机值。
+        connection: withFixedToken(connection),
+      }).then((value) => {
         server = value;
       });
       await starting;
+      // /reload 换了进程但连接信息（含网关短码与固定端口）全部继承：短码不变、地址不变，
+      // 已打开的页面靠 SSE 重连就接回来。
+      await attachWebGateway(ctx);
       attachNotifications();
       ctx.ui.notify("pi-atom-web 已随 /reload 恢复", "info");
     } catch (error) {
@@ -1409,12 +1661,17 @@ export default function atomWeb(pi) {
       bindPromptQueue(ctx);
       liveMessage = null;
       liveRunId = null;
+      generationTracker.reset();
+      liveGeneration = null;
       pendingLiveLinks.clear();
       runningTools.clear();
       await activateState(ctx);
       pendingUserRecords.length = 0;
       responseWaitOwnerId = null;
       responseWaitStartedAt = null;
+      // 分支换了：旧分支里没结算完的计时槽再也对不上号，直接丢干净。
+      turnClocks.length = 0;
+      publishProcessingHead();
       if (name === "session_tree") historyRevision += 1;
       publish(
         ctx,
@@ -1423,9 +1680,10 @@ export default function atomWeb(pi) {
             ? { messages: displayMessages(), historyRevision }
             : {}),
           liveMessage,
+          liveGeneration,
           tools: [],
           toolTimings: Object.fromEntries(completedToolTimings),
-          thinkingTimings: Object.fromEntries(completedThinkingTimings),
+          thinkingTimings: thinkingTimingsPatch(),
           disclosures: Object.fromEntries(disclosures),
           pendingUserMessages: [],
           responseWaitStartedAt,
@@ -1444,9 +1702,45 @@ export default function atomWeb(pi) {
     // 带上历史刷新：运行态要挂到那条 /compact 命令记录上（见 displayMessages）。
     publish(ctx, { compacting }, { history: true });
   });
-  const endCompaction = (succeeded, _event, ctx) => {
+  const endCompaction = (succeeded, event, ctx) => {
     context = ctx;
     compacting = false;
+    // 先把触发原因按条目 id 记下（所有三种压缩都要）：落盘的 CompactionEntry 不带 reason，
+    // 而前端要靠它把「手动压缩」当页面边界、把「自动压缩」当本轮的一步。
+    if (
+      succeeded &&
+      typeof event?.compactionEntry?.id === "string" &&
+      (event?.reason === "manual" ||
+        event?.reason === "threshold" ||
+        event?.reason === "overflow")
+    ) {
+      completedCompactionReasons.set(event.compactionEntry.id, event.reason);
+      if (completedCompactionReasons.size > 500)
+        completedCompactionReasons.delete(
+          completedCompactionReasons.keys().next().value,
+        );
+      persistState();
+    }
+    // 自动压缩（上下文阈值 / 溢出恢复）：没有命令记录可挂完成行，改为把耗时按压缩
+    // 条目 id 记下来（见 `completedCompactionTimings`），前端渲染成标题右侧耗时。
+    // 手动 `/compact`（含在 TUI 里执行的）不记，维持原样。
+    if (
+      succeeded &&
+      compactionStartedAt != null &&
+      (event?.reason === "threshold" || event?.reason === "overflow") &&
+      typeof event?.compactionEntry?.id === "string"
+    ) {
+      const endedAt = Date.now();
+      completedCompactionTimings.set(event.compactionEntry.id, {
+        startedAt: compactionStartedAt,
+        durationMs: Math.max(0, endedAt - compactionStartedAt),
+      });
+      if (completedCompactionTimings.size > 500)
+        completedCompactionTimings.delete(
+          completedCompactionTimings.keys().next().value,
+        );
+      persistState();
+    }
     // 成功时把起止时间写进触发它的命令记录（落盘，刷新后仍显示「压缩完成（耗时…）」）；
     // 失败时不写 —— 失败提示由 context.compact 的 onError 通知承担。
     if (succeeded && compactionRecordId && compactionStartedAt != null) {
@@ -1492,26 +1786,27 @@ export default function atomWeb(pi) {
         if (name === "agent_settled") {
           recordInterruption(ctx.sessionManager.getBranch());
           fallbackThinkingTimings(ctx);
+          // 没等到 message_end 就结束（中止 / 强杀）：把残留的流式观测结算掉，
+          // 否则这条消息的正文/思考时间会从平均值里整个消失。
+          settleGeneration();
           // 整轮真正结束：结算总时长并清空起点，前端据此显示「已完成（时长）」。
           // 放在 agent_settled 而不是 agent_end：后者后面可能紧跟自动重试/续跑，
           // 那仍属于同一轮，提前结算会让时长偏短。
-          if (processingStartedAt != null) {
-            const key = turnProcessingKey(ctx.sessionManager.getBranch());
-            if (key) {
-              turnProcessing.set(key, {
-                startedAt: processingStartedAt,
-                durationMs: Date.now() - processingStartedAt,
-                status: turnWasInterrupted(
-                  ctx.sessionManager.getBranch(),
-                )
-                  ? "interrupted"
-                  : "done",
-              });
-              if (turnProcessing.size > 500)
-                turnProcessing.delete(turnProcessing.keys().next().value);
-              persistState();
-            }
-            processingStartedAt = null;
+          // 整轮真正结束：结算总时长并弹掉这一轮的计时槽，前端据此显示「已完成（时长）」。
+          // 放在 agent_settled 而不是 agent_end：后者后面可能紧跟自动重试/续跑，
+          // 那仍属于同一轮，提前结算会让时长偏短。
+          const settled = settleTurnClock(ctx.sessionManager.getBranch());
+          if (settled) {
+            turnProcessing.set(settled.key, {
+              startedAt: settled.startedAt,
+              durationMs: Date.now() - settled.startedAt,
+              status: turnWasInterrupted(ctx.sessionManager.getBranch())
+                ? "interrupted"
+                : "done",
+            });
+            if (turnProcessing.size > 500)
+              turnProcessing.delete(turnProcessing.keys().next().value);
+            persistState();
           }
         }
         if (responseWaitOwnerId) {
@@ -1541,6 +1836,7 @@ export default function atomWeb(pi) {
           modelOptions: modelOptions(),
           responseWaitStartedAt,
           processingStartedAt,
+          liveGeneration,
           compacting,
           turnProcessing: Object.fromEntries(turnProcessing),
           pendingUserMessages: pendingUserMessages(),
@@ -1562,8 +1858,16 @@ export default function atomWeb(pi) {
     liveRunId ??= `${ctx.sessionManager.getSessionId()}:live:${randomUUID()}`;
     thinkingTracker.track(event.message);
     thinkingTracker.settle(event.message);
+    generationTracker.track(event.message);
+    generationTracker.settle(event.message);
+    liveGeneration = generationTracker.streaming();
     liveMessage = { ...event.message, id: liveRunId };
-    publish(ctx, { liveMessage, responseWaitStartedAt });
+    publish(ctx, {
+      liveMessage,
+      responseWaitStartedAt,
+      liveGeneration,
+      thinkingTimings: thinkingTimingsPatch(),
+    });
   });
   pi.on("message_end", (event, ctx) => {
     context = ctx;
@@ -1581,14 +1885,27 @@ export default function atomWeb(pi) {
           sessionId: ctx.sessionManager.getSessionId(),
           settled,
         });
+      // 这条消息的正文/思考观测结算进会话总量（stats.generation）；
+      // 下面的 publish 带 stats: true，所以平均值会跟着一起下发。
+      settleGeneration(event.message);
       liveMessage = null;
       liveRunId = null;
-      publish(ctx, { liveMessage }, { history: true, stats: true });
+      publish(
+        ctx,
+        { liveMessage, liveGeneration },
+        { history: true, stats: true },
+      );
     } else publish(ctx, {}, { history: true, stats: true });
   });
   pi.on("message_start", (event, ctx) => {
     context = ctx;
     if (event.message?.role === "user") {
+      // 引导队列里的消息开始送达（宿主在发事件前已把它从队列摘掉）：
+      // 记下签名并落盘，状态行因此能显示「16:17 · 引导」。
+      const steered = noteSteeringDelivery(
+        ctx.sessionManager,
+        event.message,
+      );
       const sessionId = ctx.sessionManager.getSessionId();
       const content = userMessageText(event.message.content);
       const candidates = pendingUserRecords.filter(
@@ -1602,12 +1919,20 @@ export default function atomWeb(pi) {
         record.acceptedContent = event.message.content;
         responseWaitOwnerId = record.message.id;
         responseWaitStartedAt ||= Date.now();
-        processingStartedAt ||= responseWaitStartedAt;
       }
+      // 整轮计时在这里起表（与 agent_start 谁先到无关）：**一条输入 = 一轮 = 一个计时槽**，
+      // 排队送达、TUI 里输入、Web 提交都一样。
+      // 引导不起表：它算在被打断的那一轮里，不单独拿「已完成（时长）」。
+      if (!steered) beginTurnClock(ctx.sessionManager);
+      if (steered) persistState();
     } else if (event.message?.role === "assistant") {
       liveRunId ??= `${ctx.sessionManager.getSessionId()}:live:${randomUUID()}`;
       thinkingTracker.reset();
       thinkingTracker.track(event.message);
+      // 一条 assistant 消息 = 一次生成观测（工具循环里每条都单独计）。
+      generationTracker.reset();
+      generationTracker.track(event.message);
+      liveGeneration = null;
       if (responseWaitOwnerId) {
         responseWaitOwnerId = null;
         responseWaitStartedAt = null;
@@ -1620,6 +1945,8 @@ export default function atomWeb(pi) {
         pending: ctx.hasPendingMessages(),
         responseWaitStartedAt,
         processingStartedAt,
+        liveGeneration,
+        thinkingTimings: thinkingTimingsPatch(),
       },
       { history: true },
     );
@@ -1682,6 +2009,8 @@ export default function atomWeb(pi) {
     pendingUserRecords.length = 0;
     responseWaitOwnerId = null;
     responseWaitStartedAt = null;
+    turnClocks.length = 0;
+    publishProcessingHead();
     packageCompatibilities.clear();
     clearTimeout(publishTimer);
     publishTimer = undefined;
@@ -1706,17 +2035,66 @@ export default function atomWeb(pi) {
       }
     },
   });
-  // 关闭服务（两个命令共用）。
+  // 关闭服务（两个命令共用）。只摸本会话：网关本体留给其他会话，它自己在路由表空了之后退出。
   const stopWebServer = async (ctx) => {
     if (starting) await starting;
+    await detachWebGateway();
     await server?.close();
     server = undefined;
     detachNotifications();
+    // 记下「用户主动关了」：下次启动不再自动恢复（用户 2026-09-30）。
+    forgetWebSession(ctx.sessionManager.getSessionId());
     notifyLocal(ctx, "pi-atom-web 已关闭", "info");
+  };
+  /**
+   * 重启 pi 后把 Web 自己接回来（用户 2026-09-30：页面常常开在另一台机器上，
+   * 那里的人回不到 TUI 执行 /web，所以恢复不能等人）。
+   *
+   * 只对「上次显式执行过 /web、/web-wlan，且没被 `/web stop` 抹掉」的会话生效，
+   * 并受 `config.json` 里的 `autoServe` 总开关约束。短码与固定凭证都只跟会话 id 有关，
+   * 所以同一个地址会直接活回来（局域网模式照原样恢复成 0.0.0.0）。
+   * 失败不致命：只在 TUI 说一句。
+   */
+  const autoServeWeb = async (ctx) => {
+    if (server || starting || ctx.mode !== "tui") return;
+    const mode = autoServeMode(ctx.sessionManager.getSessionId());
+    if (!mode) return;
+    try {
+      await startWebServer(mode === "lan" ? { host: LAN_HOST } : undefined);
+      await attachWebGateway(ctx);
+      attachNotifications();
+      notifyLocal(
+        ctx,
+        mode === "lan"
+          ? `pi-atom-web 已自动恢复（局域网）\n${server.url}\n该模式不校验 Host/Origin，请仅在可信网络使用；不想要自动恢复请执行 /web auto off。`
+          : `pi-atom-web 已自动恢复\n${server.url}`,
+        mode === "lan" ? "warning" : "info",
+      );
+    } catch (error) {
+      notifyLocal(ctx, `Web UI 自动恢复失败：${error.message}`, "warning");
+    }
+  };
+  /**
+   * 固定凭证（设置页「固定凭证」，用户 2026-09-25 选定）：开启后凭证一律由
+   * sha256(本机密钥 + 会话 id) 派生，**覆盖**掉 /reload 交接来的旧值与上次随机值，
+   * 于是同一会话任何时候的地址都一样（本机与局域网都一样，凭证只跟会话 id 有关）。
+   * 关掉就退回 `startServer` 里每次随机 32 字节的做法。
+   */
+  const withFixedToken = (connection) => {
+    if (!readWebConfig().fixedToken) return connection;
+    return {
+      ...(connection || {}),
+      token: deriveSessionToken(context.sessionManager.getSessionId()),
+    };
   };
   // 启动服务并记录实例；并发调用复用同一次启动过程。
   const startWebServer = (connection) => {
-    starting ??= startServer({ snapshot, action, connection })
+    starting ??= startServer({
+      snapshot,
+      action,
+      workspaceContext: () => ({ sessionId: context.sessionManager.getSessionId(), cwd: context.cwd }),
+      connection: withFixedToken(connection),
+    })
       .then((value) => {
         server = value;
       })
@@ -1724,6 +2102,111 @@ export default function atomWeb(pi) {
         starting = undefined;
       });
     return starting;
+  };
+  // 网关端口与固定凭证配置（用户级文件 ~/.pi/atom/web/config.json）+ 本会话已登记的入口，
+  // 一起下发给设置页。
+  const webConfigSnapshot = () => ({
+    ...readWebConfig(),
+    tokenKeyPath: webTokenKeyPath(),
+    gateway: gateway
+      ? { id: gateway.id, port: gateway.port, lan: gateway.lan }
+      : null,
+  });
+  /**
+   * 把本会话登记到固定端口的网关上，并把 server.url 换成
+   * `http://<host>:<固定端口>/<短码>/#<凭证>`。失败不致命：保留直连地址（随机端口），
+   * 只在 TUI 说清原因（用户 2026-09-25 要的固定端口就靠这一步）。
+   */
+  const attachWebGateway = async (ctx) => {
+    if (!server) return;
+    const lan = server.connection.host === "0.0.0.0";
+    // 模式变了（/web ↔ /web-wlan）就要换到另一个网关上重新登记。
+    if (gateway && gateway.lan !== lan) {
+      await gateway.stop();
+      gateway = undefined;
+    }
+    if (gateway) return;
+    try {
+      gateway = await attachGateway({
+        lan,
+        sessionId: context.sessionManager.getSessionId(),
+        privatePort: server.connection.port,
+        preferredId: server.connection.proxy?.id,
+      });
+      server.connection = {
+        ...server.connection,
+        proxy: { id: gateway.id, publicPort: gateway.port },
+      };
+      server.url = publicUrl({
+        host: new URL(server.url).hostname,
+        port: gateway.port,
+        id: gateway.id,
+        token: server.connection.token,
+      });
+    } catch (error) {
+      gateway = undefined;
+      // 接入失败就退回直连：去掉残留的 proxy 信息，地址里的端口换回本进程私有端口。
+      if (server?.connection.proxy) {
+        const { proxy, ...rest } = server.connection;
+        server.connection = rest;
+        server.url = `http://${new URL(server.url).hostname}:${rest.port}/#${rest.token}`;
+      }
+      notifyLocal(
+        ctx,
+        `未能接入固定端口网关（${error.message}），本次仍用直连地址。`,
+        "warning",
+      );
+    }
+  };
+  // 只注销本会话这一条路由；网关本体属于所有会话，由它自己在空闲后退出。
+  const detachWebGateway = async () => {
+    await gateway?.stop();
+    gateway = undefined;
+  };
+  /**
+   * 换凭证代价一次服务重启：监听地址、端口、网关路由都不动（路由按短码 + 私有端口记账，
+   * 它不认识凭证），只有凭证换代。新地址回给设置页展示（调用方此刻还拿着旧凭证，是已鉴权的）。
+   */
+  const restartWebServerWithCurrentMode = async () => {
+    const current = server?.connection;
+    if (!current) return {};
+    await detachWebGateway();
+    await server.close();
+    server = undefined;
+    await startWebServer(current);
+    await attachWebGateway(context);
+    notifyLocal(
+      context,
+      `pi-atom-web · 凭证已换代，请用新地址\n${server.url}`,
+      "info",
+    );
+    return { token: server.connection.token, url: server.url };
+  };
+  // 设置页改 Web 设置：写用户级配置并广播新值。端口要下一次执行 /web 或 /web-wlan 才生效；
+  // 固定凭证开关变了就当场换凭证（用户 2026-09-25 选的「立即重启页面服务」）。
+  const configureWeb = async (input) => {
+    const before = readWebConfig();
+    const next = writeWebConfig({
+      port: input.port,
+      lanPort: input.lanPort,
+      fixedToken: input.fixedToken,
+      autoServe: input.autoServe,
+    });
+    let result = { ok: true, ...next };
+    if (server && next.fixedToken !== before.fixedToken)
+      result = { ...result, ...(await restartWebServerWithCurrentMode()) };
+    publish(context, { webConfig: webConfigSnapshot() });
+    return result;
+  };
+  /** 换本机密钥：所有会话的固定凭证一起换代。没开固定凭证时只换密钥、不动服务。 */
+  const rotateWebKey = async () => {
+    rotateTokenKey();
+    const rotated =
+      server && readWebConfig().fixedToken
+        ? await restartWebServerWithCurrentMode()
+        : {};
+    publish(context, { webConfig: webConfigSnapshot() });
+    return { ok: true, ...webConfigSnapshot(), ...rotated };
   };
   pi.registerCommand("web", {
     description: "打开当前 TUI 会话的 Web UI（/web stop 关闭服务）",
@@ -1737,13 +2220,41 @@ export default function atomWeb(pi) {
         await stopWebServer(ctx);
         return;
       }
+      // 自动恢复的全局总开关（写在用户级 config.json）：`/web auto off` 一键禁掉，
+      // 免得“上次开过”这件事永久绑定一个 0.0.0.0 入口。
+      if (args.trim().toLowerCase().startsWith("auto")) {
+        const wanted = args.trim().slice(4).trim().toLowerCase();
+        if (wanted !== "on" && wanted !== "off" && wanted !== "status") {
+          notifyLocal(ctx, "用法：/web auto on | off | status", "warning");
+          return;
+        }
+        if (wanted !== "status") writeWebConfig({ autoServe: wanted === "on" });
+        publish(context, { webConfig: webConfigSnapshot() });
+        notifyLocal(
+          ctx,
+          `Web 自动恢复：${readWebConfig().autoServe ? "已开启" : "已关闭"}（只影响上次显式开过 Web 的会话，下次启动 pi 生效）`,
+          "info",
+        );
+        return;
+      }
       if (args.trim()) {
-        notifyLocal(ctx, "用法：/web 或 /web stop", "warning");
+        notifyLocal(
+          ctx,
+          "用法：/web、/web stop 或 /web auto on | off | status",
+          "warning",
+        );
         return;
       }
       try {
         if (!server) await startWebServer();
+        await attachWebGateway(ctx);
         attachNotifications();
+        // 记进登记表：下次重启 pi（不是 /reload）时自动把服务接回来，
+        // 浏览器在另一台机器上也就不需要有人回 TUI 敲命令。
+        rememberWebSession(
+          ctx.sessionManager.getSessionId(),
+          "loopback",
+        );
         notifyLocal(ctx, `pi-atom-web · 当前会话\n${server.url}`, "info");
         if (!(await openBrowser(server.url)))
           notifyLocal(ctx, "未能自动打开浏览器，请打开上方地址", "warning");
@@ -1776,9 +2287,13 @@ export default function atomWeb(pi) {
           const current = server.connection;
           await server.close();
           server = undefined;
-          await startWebServer({ ...current, host: "0.0.0.0" });
-        } else await startWebServer({ host: "0.0.0.0" });
+          await startWebServer({ ...current, host: LAN_HOST });
+        } else await startWebServer({ host: LAN_HOST });
+        await attachWebGateway(ctx);
         attachNotifications();
+        // 局域网模式也登记（用户 2026-09-30 选定：lan 也自动恢复）——
+        // 全局禁止用 /web auto off；单次不想留用 /web-wlan stop（会抹掉登记）。
+        rememberWebSession(ctx.sessionManager.getSessionId(), "lan");
         // 每张网卡都给出带凭证的完整地址，避免手工拼地址时丢掉 # 片段。
         const addressUrl = (address) => {
           const url = new URL(server.url);

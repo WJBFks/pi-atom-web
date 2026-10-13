@@ -9,8 +9,14 @@ export const useComposerStore = defineStore("composer", {
     commandIndex: 0,
     dismissed: "",
     picker: null,
+    // 合并面板里当前是哪个视图（"levels" 思考级别 / "model" 供应方+模型）。
+    // 没在 composer 里建模因为面板只在 picker 打开时存在，但 /model 命令需要直接落到模型视图。
+    pickerTab: "levels",
     provider: null,
     modelQuery: "",
+    // 忙碌时选的新模型/新思考级别：Pi 要求空闲才能切，先缓在浏览器里，空闲后由 ComposerDock 自动补发。
+    pendingModel: null,
+    pendingThinking: "",
     popover: null,
     view: "chat",
     viewTouched: false,
@@ -65,6 +71,7 @@ export const useComposerStore = defineStore("composer", {
       this.picker = value;
       this.popover = null;
       if (value === "model") {
+        this.pickerTab = "levels";
         this.modelQuery = "";
         if (
           this.provider &&

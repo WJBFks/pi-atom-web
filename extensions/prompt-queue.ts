@@ -9,6 +9,8 @@ function hashText(value) {
   return (hash >>> 0).toString(36);
 }
 
+const MAX_STEER_PENDING = 200;
+
 function messageParts(message) {
   if (typeof message === "string") return { text: message, images: [] };
   if (message && typeof message === "object" && Array.isArray(message.content)) {
@@ -32,10 +34,23 @@ function messageParts(message) {
   };
 }
 
+// 队列项与会话里的用户消息共用同一个签名（文本 + 图片），用于判断
+// 「这条送达的消息就是之前进过引导队列的那一条」。带镜像长度避免 FNV 碰撞误标。
+function signatureOf(message) {
+  const { text, images } = messageParts(message);
+  const raw = `${text}\0${images.map((image) => `${image.mimeType}:${image.data}`).join("\0")}`;
+  return `${hashText(raw)}:${raw.length}`;
+}
+
+/** 会话里一条用户消息的引导签名（服务端逐列历史时用同一算法比对）。 */
+export function steeringSignature(message) {
+  return signatureOf(message);
+}
+
 function queueItems(kind, messages) {
   return [...(messages || [])].map((message, index) => {
     const { text, images } = messageParts(message);
-    const signature = `${text}\0${images.map((image) => `${image.mimeType}:${image.data}`).join("\0")}`;
+    const signature = signatureOf(message);
     return {
       id: `${kind}:${index}:${hashText(signature)}`,
       kind,
@@ -93,8 +108,26 @@ export function createPromptQueueBridge() {
       state.revision,
     );
   };
+  // Pi 落盘的用户 entry 不带来源标记（`_queueSteer` 只递 `{role,content,timestamp}`），
+  // 所以「这条消息是引导送达的」只能由我们自己的队列观察推定：
+  // 快照里新出现在引导队列里的签名计入待送达，消息送达时核销并交给上层落盘。
+  // 已知偏差：引导项被删除或改文字后，旧签名会留在待送达里（上限 200），
+  // 之后恰好发同一文本的普通消息会被误标；与宿主自己「按文本相等」同量级的启发式。
+  const trackSteering = (state, snapshot) => {
+    const next = snapshot.steering.map((item) => signatureOf(item));
+    const remaining = [...state.steerSeen];
+    for (const signature of next) {
+      const at = remaining.indexOf(signature);
+      if (at === -1) {
+        state.steerPending.push(signature);
+        if (state.steerPending.length > MAX_STEER_PENDING) state.steerPending.shift();
+      } else remaining.splice(at, 1);
+    }
+    state.steerSeen = next;
+  };
   const notify = (state) => {
     const snapshot = read(state);
+    trackSteering(state, snapshot);
     for (const listener of state.listeners) listener(snapshot);
     return snapshot;
   };
@@ -145,6 +178,8 @@ export function createPromptQueueBridge() {
         suppressed: false,
         notifyScheduled: false,
         unsubscribe: undefined,
+        steerSeen: [],
+        steerPending: [],
       };
       state.unsubscribe = session.subscribe?.((event) => {
         if (event?.type === "queue_update") changed(state);
@@ -169,6 +204,18 @@ export function createPromptQueueBridge() {
     },
     snapshot(sessionManager) {
       return read(stateFor(sessionManager));
+    },
+    /**
+     * 一条用户消息开始送达：如果它就是之前进过引导队列的那一条，核销一条待送达记录。
+     * 返回 true 则上层需要把签名落盘（刷新后仍能看到「引导」标记）。
+     */
+    noteDelivery(sessionManager, message) {
+      const state = sessions.get(sessionManager);
+      if (!state || !message) return false;
+      const index = state.steerPending.indexOf(signatureOf(message));
+      if (index === -1) return false;
+      state.steerPending.splice(index, 1);
+      return true;
     },
     listen(sessionManager, listener) {
       const state = stateFor(sessionManager);

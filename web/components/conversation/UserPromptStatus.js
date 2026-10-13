@@ -5,6 +5,7 @@ import { writeClipboard } from "../../clipboard.js";
 import { contentBlocks, useConversationStore } from "../../stores/conversation.js";
 import { useSessionStore } from "../../stores/session.js";
 import { formatFullTime, IconTipButton } from "./ProcessingStatus.js";
+import { useHoverTip } from "./hover-tip.js";
 
 const pad = (value) => String(value).padStart(2, "0");
 
@@ -47,18 +48,11 @@ export default defineComponent({
     const session = useSessionStore();
     const copied = ref(false);
     const failed = ref(false);
-    const open = ref(false);
     const switching = ref(false);
-    let hideTimer, copyTimer, failTimer;
+    // 时间文字的浮层走 PortalTip（见 hover-tip.js）：留在正文里会被吸顶标题压住。
+    const { anchor, show, hide, tip } = useHoverTip();
+    let copyTimer, failTimer;
 
-    const show = () => {
-      clearTimeout(hideTimer);
-      open.value = true;
-    };
-    const hide = () => {
-      clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => (open.value = false), 120);
-    };
     const report = (error) => props.onError?.(error?.message || String(error));
     const copy = async () => {
       const text = promptText(props.message);
@@ -92,7 +86,6 @@ export default defineComponent({
       }
     };
     onUnmounted(() => {
-      clearTimeout(hideTimer);
       clearTimeout(copyTimer);
       clearTimeout(failTimer);
     });
@@ -105,6 +98,8 @@ export default defineComponent({
           h("span", { class: "user-prompt-restarting" }, "正在重启该轮…"),
         ]);
       const branch = message.branch || null;
+      // 「引导」标记：服务端从 Prompt 队列推定（Pi 落盘的 entry 不带来源）。
+      const steered = message.delivery === "steer";
       const timestamp = Number.isFinite(message.timestamp)
         ? message.timestamp
         : null;
@@ -153,20 +148,19 @@ export default defineComponent({
               "span",
               {
                 class: "user-prompt-time",
+                ref: anchor,
                 onMouseenter: show,
                 onMouseleave: hide,
               },
               [
                 formatClockTime(timestamp),
-                open.value
-                  ? h(
-                      "span",
-                      { class: "status-tip", role: "tooltip" },
-                      formatFullTime(timestamp),
-                    )
-                  : null,
+                // 状态行在气泡下方且靠右：浮层向下、与时间文字右缘对齐（向上会压住自己的气泡）。
+                tip(formatFullTime(timestamp), { placement: "bottom", align: "end" }),
               ],
             ),
+        // 引导送达的消息在时间后补一段「· 引导」（行本身就是 flex gap:6px）。
+        steered ? h("span", { class: "user-prompt-separator" }, "·") : null,
+        steered ? h("span", { class: "user-prompt-kind" }, "引导") : null,
       ]);
     };
   },

@@ -129,3 +129,92 @@ test("401 is a terminal authorization failure", async () => {
     transport.stop();
   }
 });
+
+test("a silent half-open stream is detected by the idle watchdog and resynced", async () => {
+  let source,
+    requests = 0;
+  const states = [];
+  const transport = createEventStream({
+    token: "a".repeat(64),
+    idleLimitMs: 80,
+    onEvent: () => {},
+    onState: (value) => states.push(value),
+    onError: () => {},
+    fetchImpl: async (_path, { signal } = {}) => {
+      requests++;
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            source = controller;
+            // 真实 fetch 会把 AbortSignal 接在流上；假实现也要接，否则 abort() 是空操作。
+            signal?.addEventListener?.("abort", () => {
+              const error = new Error("aborted");
+              error.name = "AbortError";
+              controller.error(error);
+            });
+          },
+        }),
+      );
+    },
+  });
+  try {
+    await until(() => source);
+    const first = source;
+    first.enqueue(encode(snapshot));
+    await until(() => states.includes("connected"));
+    // 之后一个字节都不再到达：既不 resolve 也不 reject（机器休眠后的典型形态）。
+    // 服务端每 15s 会写 `: heartbeat`，所以沉默本身就说明连接已死。
+    await until(() => requests === 2);
+    await until(() => source !== first);
+    assert.equal(states.filter((value) => value === "reconnecting").length, 1);
+  } finally {
+    transport.stop();
+  }
+});
+
+test("resume() resyncs only after a long silence, never on a fresh stream", async () => {
+  let source,
+    requests = 0;
+  const make = (resumeStaleMs) =>
+    createEventStream({
+      token: "a".repeat(64),
+      idleLimitMs: 100_000, // 本用例只验 resume 分支，不让看门狗抢跑
+      resumeStaleMs,
+      onEvent: () => {},
+      onState: () => {},
+      onError: () => {},
+      fetchImpl: async (_path, { signal } = {}) => {
+        requests++;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              source = controller;
+              signal?.addEventListener?.("abort", () => {
+                const error = new Error("aborted");
+                error.name = "AbortError";
+                controller.error(error);
+              });
+            },
+          }),
+        );
+      },
+    });
+
+  const fresh = make(60_000);
+  await until(() => source);
+  source.enqueue(encode(snapshot));
+  await until(() => requests === 1);
+  fresh.resume();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(requests, 1, "刚收到过字节时 resume 不该重连");
+  fresh.stop();
+
+  source = undefined;
+  const stale = make(0); // 沉默阈值为 0：任何 resume 都应当立刻重连
+  await until(() => source);
+  source.enqueue(encode(snapshot));
+  await until(() => requests === 2);
+  stale.resume();
+  await until(() => requests === 3);
+  stale.stop();
+});

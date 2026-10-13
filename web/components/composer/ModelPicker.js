@@ -8,7 +8,8 @@ export default defineComponent({
     selected: Object,
     provider: String,
     query: String,
-    busy: Boolean,
+    // 内嵌到合并面板里时：不再自己定位/画框，只当一块内容用。
+    embedded: Boolean,
     chooseProvider: Function,
     updateQuery: Function,
     chooseModel: Function,
@@ -44,17 +45,25 @@ export default defineComponent({
           "data-provider-id": model.provider,
           "data-model-id": model.id,
           class: { selected: selected(model) },
-          disabled: props.busy,
+          // 不再因为忙碌而禁用：忙碌时的选择由外面排队到空闲（用户 2026-09-25）。
           onClick: () => props.chooseModel?.(model),
         },
-        [selected(model) && icon("check"), h("span", model.name)],
+        // 选中勾放右边（用户 2026-09-25：供应方/模型/思考级别三处的勾全改到右边）。
+        [
+          h("span", { class: "picker-label" }, model.name),
+          selected(model) &&
+            h("span", { class: "picker-check" }, icon("check")),
+        ],
       );
     return () =>
       h(
         "div",
         {
           id: "model-picker",
-          class: "setting-picker",
+          class: [
+            "setting-picker",
+            { embedded: props.embedded, "model-picker": true },
+          ],
           role: "dialog",
           "aria-label": "选择模型",
         },
@@ -71,7 +80,11 @@ export default defineComponent({
                   class: { selected: props.provider === id },
                   onClick: () => props.chooseProvider?.(id),
                 },
-                [props.provider === id && icon("check"), name],
+                [
+                  h("span", { class: "picker-label" }, name),
+                  props.provider === id &&
+                    h("span", { class: "picker-check" }, icon("check")),
+                ],
               ),
             ),
             h(
@@ -82,7 +95,11 @@ export default defineComponent({
                 class: ["show-all", { selected: !props.provider }],
                 onClick: () => props.chooseProvider?.(null),
               },
-              [!props.provider && icon("check"), "显示全部"],
+              [
+                h("span", { class: "picker-label" }, "显示全部"),
+                !props.provider &&
+                  h("span", { class: "picker-check" }, icon("check")),
+              ],
             ),
           ]),
           h("div", { class: "model-list" }, [

@@ -120,5 +120,5 @@ Verify at minimum:
 - generic select, confirm, input, custom terminal, SSE, and reload still work
 - `npm run check`, `npm test`, and `npm run test:browser` pass
 
-Update `AGENTS.md`, `README.md`, and `CHANGELOG.md` when compatibility architecture or supported package behavior changes.
+Update `DETAILS.md` (§21 third-party package compatibility), `README.md`, and `CHANGELOG.md` when compatibility architecture or supported package behavior changes; put it in `AGENTS.md` only when it is a project-wide hard constraint.
 

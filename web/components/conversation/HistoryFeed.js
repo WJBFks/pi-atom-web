@@ -3,8 +3,8 @@ import { messageId, useConversationStore } from "../../stores/conversation.js";
 import { useSessionStore } from "../../stores/session.js";
 import MessageItem from "./MessageItem.js";
 import { formatProcessingDuration } from "./ProcessingStatus.js";
-import TurnGroup from "./TurnGroup.js";
-import { groupMessages } from "./turnGroups.js";
+import { renderTurnGroup } from "./TurnGroupView.js";
+import { groupMessages, splitRunningTail } from "./turnGroups.js";
 
 const visibleInTrace = (message) =>
   [
@@ -40,14 +40,19 @@ export default defineComponent({
         text: `${interrupted ? "已中断" : "已完成"}（${formatProcessingDuration(timing.durationMs)}）`,
       };
     };
-    const render = (message, key, withStatus = true) =>
+    const render = (message, key, withStatus = true, extraClass = "", blockOffset = 0) =>
       h(MessageItem, {
         key,
         message,
+        // 轮次分组用它标记组内首/尾条目：CSS 据此只在这两块把时间轴线段剪短
+        // （首个圆点上方不引线、最后一个圆点下方不引线）。
+        class: extraClass || undefined,
         tools: conversation.historyTools,
         // 用户状态行的编辑/分支切换动作要用凭证；随消息一起透传。
         token: props.token,
         onError: props.onError,
+        // 中间过程组按「消息」切段后的块下标偏移（保住思考块的稳定身份）。
+        blockOffset,
         // 组内消息默认不挂徽标：最终输出的「拆分前半段」与最终消息共用同一 id，
         // 若都允许查表，同一徽标会在折叠组内（上方）和最终输出（下方）各出现一次。
         status: withStatus ? turnStatus(message) : null,
@@ -60,57 +65,36 @@ export default defineComponent({
         // 独立消息（含某组的最终输出）：id 命中 turnProcessing 就挂徽标。
         return render(entry.message, key);
       }
-      const { group, keepOpen } = entry;
-      // 中断轮次：最终输出为空、整轮都在组内，徽标改挂组内最后一条 assistant；
-      // 正常轮次的徽标挂在组外最终输出上，组内一律不挂。
-      let lastAssistantId = null;
-      if (!group.finalMessage) {
-        for (let i = group.messages.length - 1; i >= 0; i -= 1) {
-          if (group.messages[i]?.role === "assistant") {
-            lastAssistantId = messageId(group.messages[i]);
-            break;
-          }
-        }
-      }
-      return h(
-        TurnGroup,
-        {
-          key: group.key,
-          blockKey: group.key,
-          title: group.title,
-          // 保持展开直到下一个用户输入开始；用户手动操作过则以记录状态为准（在 TurnGroup 内处理）
-          keepOpen,
-        },
-        {
-          default: () =>
-            group.intermediate.map((message, position) =>
-              render(
-                message,
-                `${group.key}:${messageId(message) ?? position}`,
-                messageId(message) === lastAssistantId,
-              ),
-            ),
-        },
-      );
+      // 「组1 / 消息1 / 组2 / …」的渲染结构与 live 区共用同一份实现（见 TurnGroupView.js）：
+      // 同一轮只在其中一个容器里出一份 DOM，移交时形状完全一致。
+      return renderTurnGroup(entry.group, {
+        keepOpen: entry.keepOpen,
+        renderUnit: (unit, key, withStatus, extraClass) =>
+          render(unit.message, key, withStatus, extraClass, unit.offset),
+      });
     };
     return () => {
       const messages = conversation.messages.filter(
         (message) => !props.trace || visibleInTrace(message),
       );
+      // **分流边界是「这一轮是否结束」**（用户 2026-09-25）：还在进行的那一整轮（末尾那段没被
+      // 「消息」切断的 run）连同正在流式的消息一起交给 live 区渲染，历史只渲染已经结束的轮。
+      // 于是正在生成的卡片住在它所属那一轮的 `<details>` 里，分组（只以「消息」划分）、级联折叠
+      // 与轮次标题的计数都只有一份计算、一份 DOM。历史这一侧仍只依赖 messages，
+      // 流式期间不会重算整段 transcript。
+      const { history } = splitRunningTail(messages, {
+        running:
+          !props.trace &&
+          (session.busy ||
+            Boolean(conversation.liveMessage) ||
+            conversation.tools.length > 0),
+        hasPendingUser: conversation.pendingUserMessages.length > 0,
+      });
       // 执行轨迹视图保持平铺，不做按轮折叠。
       const entries = props.trace
         ? messages.map((message) => ({ kind: "message", message }))
-        : groupMessages(messages, {
-            // 已经显示、尚未进入历史的用户消息也算「下一个用户输入开始」。
-            nextUserInput: conversation.pendingUserMessages.length > 0,
-            // 加载（首次快照 / /reload）时已加载的中间过程全部折叠
-            // （会话正在生成时保留正在跑的那一轮）。
-            collapseLoaded: conversation.collapseLoaded,
-            running:
-              session.busy ||
-              Boolean(conversation.liveMessage) ||
-              conversation.tools.length > 0,
-          });
+        : // 进行中的那一轮不在这里，所以历史里没有任何「正在进行」的轮：一律折叠。
+          groupMessages(history, { running: false });
       return h("div", { id: "message-history" }, entries.map(renderEntry));
     };
   },

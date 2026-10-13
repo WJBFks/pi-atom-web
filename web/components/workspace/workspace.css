@@ -1,0 +1,136 @@
+.workspace-panel { --ws-border: var(--border, #30333a); display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; background: var(--bg, #111216); color: var(--text, #eee); font: 13px/1.5 sans-serif; }
+.ws-bar, .ws-toolbar, .ws-git-actions, .ws-diff-head { display: flex; align-items: center; gap: 7px; padding: 8px; border-bottom: 1px solid var(--ws-border); flex-wrap: wrap; height: auto; min-height: 0; }
+.workspace-panel button, .workspace-panel select, .workspace-panel input, .workspace-panel textarea { font: inherit; color: inherit; }
+.workspace-panel button, .workspace-panel select, .workspace-panel input { background: var(--panel, #191a20); border: 1px solid var(--ws-border); border-radius: 6px; padding: 5px 8px; }
+.workspace-panel button { cursor: pointer; }
+.workspace-panel button:hover { background: var(--hover, #252730); }
+.workspace-panel button:disabled { opacity: .45; cursor: default; }
+.ws-main { display: grid; grid-template-columns: minmax(120px, min(var(--ws-tree-width, 32%), calc(100% - 166px))) 6px minmax(0, 1fr); flex: 1; min-height: 0; }
+.ws-tree-divider { position: relative; cursor: col-resize; touch-action: none; background: var(--bg); border: 0; }
+.ws-tree-divider::after { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: var(--ws-border); pointer-events: none; }
+.ws-main.ws-document { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.ws-preview-heading { padding: 6px 8px; color: var(--muted); border-bottom: 1px solid var(--ws-border); }
+.ws-files, .ws-editor, .ws-git { width: auto; min-width: 0; min-height: 0; overflow: auto; }
+.ws-files { display: block; padding: 0; border-right: 0; background: var(--bg); }
+.ws-files { scrollbar-gutter: stable; }
+.ws-directory-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ws-directory-actions > span { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-directory-actions > button { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-tree { padding: 5px; }
+.ws-root-row { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.ws-root-action { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; padding: 0 !important; border: 0 !important; background: transparent !important; }
+.ws-root-action:hover { background: var(--hover) !important; }
+.ws-root-action .ui-icon { display: block; width: 16px; height: 16px; }
+.ws-path-search { width: 200px; min-width: 100px; }
+.ws-new-tab { padding: 24px; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 12px; }
+.ws-new-tab h2 { flex-basis: 100%; font-size: 16px; margin: 0 0 8px; }
+.ws-tree-menu { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); }
+.ws-tree-menu > .ws-tree-action { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; visibility: hidden; }
+.ws-tree-menu > .ws-tree-action:hover { background: var(--hover) !important; }
+.ws-tree-menu > .ws-tree-action .ui-icon { display: block; width: 16px; height: 16px; }
+.ws-tree-row:hover .ws-tree-menu > button, .ws-tree-row:focus-within .ws-tree-menu > button, .ws-tree-menu.open > button { visibility: visible; }
+.ws-tree-row:hover .ws-git-badge, .ws-tree-row:focus-within .ws-git-badge, .ws-tree-row:has(.ws-tree-menu.open) .ws-git-badge { visibility: hidden; }
+.ws-tree-row:hover > .ws-entry, .ws-tree-row:focus-within > .ws-entry, .ws-tree-row:has(.ws-tree-menu.open) > .ws-entry { padding-right: 29px !important; }
+.ws-tree-menu-items { position: absolute; right: 0; top: 100%; z-index: 20; display: flex; flex-direction: column; min-width: 96px; padding: 4px; background: var(--bg); border: 1px solid var(--ws-border); border-radius: 6px; box-shadow: 0 4px 12px #0002; }
+.ws-tree-menu-items button { text-align: left; border: 0; background: transparent; }
+.ws-modal-backdrop { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: #0004; }
+.ws-rename-dialog { display: flex; flex-direction: column; gap: 12px; width: min(400px, calc(100vw - 32px)); padding: 20px; border: 1px solid var(--ws-border); border-radius: 10px; background: var(--bg); }
+.ws-rename-dialog p { margin: 0; overflow-wrap: anywhere; }
+.ws-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ws-tree-row { position: relative; display: flex; align-items: center; min-width: 0; }
+.ws-entry { display: flex; flex: 1; min-width: 0; width: 100%; text-align: left; border: 0 !important; background: transparent !important; gap: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-tree-row { border-radius: 3px; }
+.ws-tree-row:hover { background: color-mix(in srgb, var(--hover) 55%, var(--bg)); }
+.ws-tree-row.active { background: color-mix(in srgb, var(--accent) 11%, var(--bg)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent); }
+.ws-tree-row.active:hover { background: color-mix(in srgb, var(--accent) 15%, var(--bg)); }
+.ws-tree-root:hover { background: color-mix(in srgb, var(--hover) 55%, var(--bg)) !important; }
+.ws-tree-action { flex: none; padding: 2px 5px !important; border: 0 !important; background: transparent !important; }
+.ws-tree-children { margin-left: 0; padding-left: 0; }
+.ws-tree-row { padding-left: calc(var(--ws-tree-depth, 1) * 15px); }
+.ws-tree-row { min-height: 28px; }
+.ws-entry { align-items: center; min-height: 28px; padding: 3px 5px !important; gap: 5px; }
+.ws-tree-root { font-weight: 600; }
+.ws-tree-chevron, .ws-tree-icon { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; flex: none; }
+.ws-tree-chevron svg, .ws-tree-icon svg { display: block; width: 14px; height: 14px; }
+.ws-tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-git-badge { margin-left: auto; flex: none; font-size: 12px; font-weight: 600; }
+.ws-tree-row.git-added > .ws-entry { color: #278348; }
+.ws-tree-row.git-modified > .ws-entry { color: #976800; }
+.ws-tree-row.git-deleted > .ws-entry, .ws-tree-row.git-conflict > .ws-entry { color: #c23e3e; }
+[data-theme="dark"] .ws-tree-row.git-added > .ws-entry { color: #73c991; }
+[data-theme="dark"] .ws-tree-row.git-modified > .ws-entry { color: #e2c16c; }
+[data-theme="dark"] .ws-tree-row.git-deleted > .ws-entry, [data-theme="dark"] .ws-tree-row.git-conflict > .ws-entry { color: #f48771; }
+.ws-tree .ws-tree-row.ignored > .ws-entry, .ws-tree .ws-tree-row.ignored > .ws-tree-action { color: #999999; }
+[data-theme="dark"] .ws-tree .ws-tree-row.ignored > .ws-entry, [data-theme="dark"] .ws-tree .ws-tree-row.ignored > .ws-tree-action { color: #888888; }
+.ws-editor { display: flex; flex-direction: column; }
+.ws-editor-menu { position: relative; flex: none; }
+.workspace-panel .ws-editor-icon { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; background: transparent; flex: none; }
+.workspace-panel .ws-editor-icon:hover { background: var(--hover); }
+.ws-editor-icon .ui-icon { display: block; width: 16px; height: 16px; }
+.workspace-panel .ws-editor-icon.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
+/* 自动换行：开关与行号逐行对齐全部在通用层（`web/line-wrap.js` + `web/style.css` 的 `html.atom-wrap` 那组规则），
+   代码块与这里共用；所以这里不要再写一份折行规则，也不要给行号列写死高度。
+   行号列（`.ws-lines`）的内容与逐格 `height` 由 line-wrap.js 写：关闭态是一整块文本，开启态是一格一行。 */
+.ws-editor-menu-items { position: absolute; top: 100%; right: 0; z-index: 30; display: flex; flex-direction: column; min-width: 110px; padding: 4px; border: 1px solid var(--ws-border); border-radius: 6px; background: var(--bg); box-shadow: 0 4px 12px #0002; }
+.ws-editor-menu-items button { border: 0; text-align: left; background: transparent; white-space: nowrap; }
+.ws-editor-content { min-height: 0; display: flex; flex: 1; flex-direction: column; overflow: visible; }
+.ws-editor-head { display: flex; flex: none; gap: 8px; align-items: center; padding: 8px; border-bottom: 1px solid var(--ws-border); overflow: auto; }
+.workspace-panel > .ws-bar, .ws-document .ws-editor-head { height: calc(var(--workspace-header-height, 98px)/2); flex: none; flex-wrap: nowrap; padding: 4px 8px; overflow-x: auto; }
+.workspace-panel > .ws-bar { overflow-y: hidden; box-sizing: border-box; }
+.workspace-panel .ws-editor-head:has(.ws-editor-menu) { position: relative; z-index: 31; overflow: visible; }
+.ws-editor-head span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-file-tabs { display: flex; flex: none; overflow: auto; border-bottom: 1px solid var(--ws-border); }
+.ws-file-tab { display: flex; align-items: center; white-space: nowrap; }
+.ws-file-tab.active { background: var(--hover); }
+.ws-file-tab button { border: 0; background: transparent; color: inherit; padding: 6px; }
+.ws-code { display: grid; grid-template-columns: auto 1fr; grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 180px; overflow: hidden; background: var(--bg, #fff); font: 12px/1.65 ui-monospace, monospace; }
+.ws-lines { padding: 10px 8px; color: var(--muted, #8b8d98); text-align: right; white-space: pre; user-select: none; border-right: 1px solid var(--ws-border); overflow: hidden; height: 100%; }
+/* 必须自己把高度顶满：`web/style.css` 里有一条**裸元素选择器** `textarea{...;min-height:68px;max-height:250px}`（原本是给输入卡那个 textarea 写的），
+特异度比这里的类选择器低但 `max-height` 这里没声明，于是编辑区被限在 250px —— 按 12px/1.65 行高正好 12.6 行，
+表现就是「只渲染到第 12 行、下面整片空白」（用户 2026-09-30）。滚动交给 textarea 自己（`.ws-lines` 靠 onScroll 同步 scrollTop），
+所以 `.ws-code` 改成 `overflow:hidden` + 单行 `minmax(0,1fr)`，避免出现双滚动条。 */
+.ws-code textarea { resize: none; white-space: pre; overflow: auto; min-width: 0; min-height: 0; max-height: none; height: 100%; border: 0; background: transparent; padding: 10px; outline: none; font: inherit; tab-size: 2; }
+.ws-rendered-code { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; padding: 8px; }
+.ws-rendered-code .code-block { display: flex; flex-direction: column; flex: 1; min-height: 0; margin: 0; }
+.ws-rendered-code .code-copy { display: none; }
+.ws-rendered-code .code-scroll { flex: 1; min-height: 0; max-height: none; overflow: auto; }
+.ws-diff-metadata { white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; font: 12px/1.55 ui-monospace, monospace; }
+.ws-image { max-width: 100%; max-height: 70vh; object-fit: contain; margin: auto; }
+.ws-empty, .ws-error { padding: 16px; color: var(--muted, #999); }
+.ws-error, .ws-warning { color: #e98989; }
+.ws-status { padding: 5px 9px; color: var(--muted, #999); font-size: 12px; }
+.ws-git { grid-column: 1 / -1; padding: 10px; }
+.ws-git-list { display: grid; gap: 5px; padding: 8px 0; }
+.ws-git-row { display: flex; align-items: center; gap: 8px; padding: 5px; border-bottom: 1px solid var(--ws-border); }
+.ws-git-row code { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ws-git-actions input { min-width: 140px; }
+.ws-diff-head { gap: 8px; }
+.ws-diff-grid { display: grid; grid-template-columns: 42px minmax(0, 1fr) 42px minmax(0, 1fr); align-content: start; overflow: auto; font: 12px/1.55 ui-monospace, monospace; }
+.ws-diff-row { display: contents; }
+.ws-diff-row > * { min-height: 21px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ws-diff-row code { padding: 1px 6px; }
+.ws-diff-row .line-no { text-align: right; padding: 1px 6px; color: var(--muted); user-select: none; border-right: 1px solid var(--border); }
+.ws-diff-row.add code, .ws-diff-row.add .line-no { background: color-mix(in srgb, #34a853 15%, var(--bg)); }
+.ws-diff-row.delete code, .ws-diff-row.delete .line-no { background: color-mix(in srgb, #e05252 15%, var(--bg)); }
+.ws-diff-row.change code:first-of-type { background: color-mix(in srgb, #e05252 13%, var(--bg)); }
+.ws-diff-row.change code:last-of-type { background: color-mix(in srgb, #34a853 13%, var(--bg)); }
+.ws-diff-unified { overflow: auto; font: 12px/1.55 ui-monospace, monospace; }
+.ws-diff-unified .ws-diff-row { display: grid; grid-template-columns: 42px minmax(0, 1fr); min-height: 21px; white-space: pre; }
+.ws-diff-unified .line-no { text-align: right; padding-right: 6px; color: var(--muted); }
+.ws-diff-unified code { white-space: pre-wrap; }
+.ws-conflict { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.ws-conflict textarea { width: 100%; min-height: 200px; max-height: none; background: var(--bg, #fff); border: 1px solid var(--ws-border); padding: 8px; font: 12px/1.5 ui-monospace, monospace; }
+.ws-conflict-block { padding: 8px; border: 1px solid var(--ws-border); margin: 7px 0; }
+.ws-log { white-space: pre-wrap; overflow: auto; background: var(--panel, #15161a); padding: 10px; min-height: 100px; }
+.ws-save-conflict { min-height: 0; overflow: auto; padding: 8px; border-bottom: 1px solid var(--ws-border); }
+.ws-save-conflict h3 { margin: 3px 0 8px; font-size: 13px; }
+
+@media (max-width: 760px) {
+  .ws-tree-divider { display: none; }
+  .ws-main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(110px, 35%) minmax(0, 65%); }
+  .ws-files, .ws-editor { height: auto; min-height: 0; }
+  .ws-files { overflow: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+  .ws-git { height: 100%; overflow: auto; }
+  .ws-conflict { grid-template-columns: 1fr; }
+  .ws-conflict textarea { min-height: 120px; }
+}

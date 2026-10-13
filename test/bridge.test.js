@@ -1309,12 +1309,22 @@ test("compaction: running status on the /compact record, completion line and the
     assert.equal(block.summary, "压缩后的信息");
     assert.equal(block.tokensBefore, 150722);
     assert.equal(typeof block.compaction.startedAt, "number");
+    assert.equal(
+      "compactionDurationMs" in block,
+      false,
+      "手动 /compact 维持原样：只有块下方完成行，不额外给右侧耗时",
+    );
+    // 前端靠这个字段把**手动**压缩当页面边界（不进 disclosure-block turn-group）。
+    // 本用例的 session_compact 事件没带 reason，走的正是「与已完成的 /compact 命令记录配对」
+    // 那条兼容路径（覆盖扩展当时未加载的旧条目）。
+    assert.equal(block.compactionReason, "manual");
     assert.ok(
       block.compaction.endedAt >= block.compaction.startedAt,
       "结束时间不早于开始时间",
     );
 
-    // 自动压缩（没有 `/compact` 命令记录）：压缩块照常出现，但不带完成行。
+    // 自动压缩（没有 `/compact` 命令记录）：压缩块照常出现，不带完成行，
+    // 但带上耗时（`compactionDurationMs`，前端渲染成标题右侧耗时，与思考/工具同样）。
     branch.push({
       id: "entry-auto",
       type: "compaction",
@@ -1328,7 +1338,10 @@ test("compaction: running status on the /compact record, completion line and the
       { type: "session_before_compact" },
       ctx,
     );
-    await events.get("session_compact")({ type: "session_compact" }, ctx);
+    await events.get("session_compact")(
+      { type: "session_compact", reason: "threshold", compactionEntry: { id: "entry-auto" } },
+      ctx,
+    );
     const auto = await untilMessages((event) => {
       const autoBlock = event.patch.messages?.find(
         (message) => message.id === "compact-session:branch:entry-auto",
@@ -1339,6 +1352,12 @@ test("compaction: running status on the /compact record, completion line and the
       (message) => message.id === "compact-session:branch:entry-auto",
     );
     assert.equal("compaction" in autoBlock, false, "自动压缩不该有多余完成行");
+    assert.equal(autoBlock.compactionReason, "threshold");
+    assert.equal(
+      Number.isFinite(autoBlock.compactionDurationMs) && autoBlock.compactionDurationMs >= 0,
+      true,
+      "自动压缩要带耗时（供标题右侧展示）",
+    );
     assert.equal(
       auto.patch.messages.some(
         (message) => message.role === "command" && "compaction" in message,
@@ -1363,6 +1382,186 @@ test("compaction: running status on the /compact record, completion line and the
   } finally {
     reader?.cancel?.();
     await events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+    delete globalThis[Symbol.for("pi-atom-web.reload-handoff")];
+  }
+});
+
+// ---- 上下文占用（输入框旁的占比圆环） ----
+test("context usage ships in the snapshot and refreshes along with the stats", async () => {
+  const seed = await startServer({ snapshot: () => ({}), action: () => ({}) });
+  const { connection, url } = seed;
+  await seed.close();
+  const events = new Map();
+  const branch = [];
+  let usage = { tokens: 150000, contextWindow: 262144, percent: 57.222 };
+  const pi = {
+    getSessionName: () => "上下文",
+    getCommands: () => [],
+    events: { on() {} },
+    on: (name, handler) => events.set(name, handler),
+    registerCommand() {},
+  };
+  atomWeb(pi);
+  globalThis[Symbol.for("pi-atom-web.reload-handoff")] = connection;
+  const ctx = {
+    cwd: "C:/test",
+    ui: { notify() {} },
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => "ctx-session", getBranch: () => branch },
+    model: { provider: "p", id: "m" },
+    thinkingLevel: "off",
+    getContextUsage: () => usage,
+  };
+  let reader;
+  try {
+    await events.get("session_start")({}, ctx);
+    const response = await fetch(new URL("/api/events", url), {
+      headers: { Authorization: `Bearer ${connection.token}` },
+    });
+    reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const nextEvent = async () => {
+      while (!buffer.includes("\n\n")) {
+        const chunk = await reader.read();
+        assert.equal(chunk.done, false);
+        buffer += decoder.decode(chunk.value, { stream: true });
+      }
+      const end = buffer.indexOf("\n\n"),
+        frame = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      return JSON.parse(frame.slice(6));
+    };
+    const first = await nextEvent();
+    assert.deepEqual(first.snapshot.contextUsage, {
+      tokens: 150000,
+      contextWindow: 262144,
+      percent: 57.222,
+    });
+    // 刚压缩完：宿主给不出用量（tokens / percent 为 null），环要退化成「未知」而不是 0%。
+    usage = { tokens: null, contextWindow: 262144, percent: null };
+    branch.push({ id: "c1", type: "compaction", timestamp: 3, tokensBefore: 150000, summary: "摘要" });
+    await events.get("session_tree")({}, ctx);
+    let refreshed;
+    do {
+      refreshed = await nextEvent();
+    } while (!("contextUsage" in (refreshed.patch || {})));
+    assert.deepEqual(refreshed.patch.contextUsage, {
+      tokens: null,
+      contextWindow: 262144,
+      percent: null,
+    });
+    // 旧运行时没有 getContextUsage：字段退化为 null，不得抛错或断开连接。
+    delete ctx.getContextUsage;
+    await events.get("session_tree")({}, ctx);
+    let missing;
+    do {
+      missing = await nextEvent();
+    } while (!("contextUsage" in (missing.patch || {})));
+    assert.equal(missing.patch.contextUsage, null);
+  } finally {
+    await reader?.cancel();
+    await events.get("session_shutdown")();
+    delete globalThis[Symbol.for("pi-atom-web.reload-handoff")];
+  }
+});
+
+// ---- 生成速度（只算正文与思考） ----
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+test("generation speed ships live while streaming and as a session average afterwards", async () => {
+  const seed = await startServer({ snapshot: () => ({}), action: () => ({}) });
+  const { connection, url } = seed;
+  await seed.close();
+  const directory = await mkdtemp(join(tmpdir(), "pi-atom-web-speed-"));
+  const events = new Map();
+  const branch = [];
+  const pi = {
+    getSessionName: () => "速度",
+    getCommands: () => [],
+    events: { on() {} },
+    on: (name, handler) => events.set(name, handler),
+    registerCommand() {},
+  };
+  atomWeb(pi);
+  globalThis[Symbol.for("pi-atom-web.reload-handoff")] = connection;
+  const ctx = {
+    cwd: directory,
+    ui: { notify() {} },
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+    sessionManager: {
+      getSessionId: () => "speed-bridge",
+      getBranch: () => branch,
+    },
+  };
+  let reader;
+  try {
+    await events.get("session_start")({}, ctx);
+    const response = await fetch(new URL("/api/events", url), {
+      headers: { Authorization: `Bearer ${connection.token}` },
+    });
+    reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const nextEvent = async () => {
+      while (!buffer.includes("\n\n")) {
+        const chunk = await reader.read();
+        assert.equal(chunk.done, false);
+        buffer += decoder.decode(chunk.value, { stream: true });
+      }
+      const end = buffer.indexOf("\n\n"),
+        frame = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      return JSON.parse(frame.slice(6));
+    };
+    const first = await nextEvent();
+    // 刚开局没有任何观测：均值必须是空，不能拿「会话存活时长」去凑一个假速度。
+    assert.deepEqual(first.snapshot.stats.generation, {
+      tokens: 0,
+      ms: 0,
+      messages: 0,
+    });
+    assert.equal(first.snapshot.liveGeneration, null);
+
+    const thinking = { type: "thinking", thinking: "x".repeat(140) }; // 40 token
+    const text = { type: "text", text: "y".repeat(35) }; // 10 token
+    await events.get("message_start")(
+      { message: { role: "assistant", content: [thinking] } },
+      ctx,
+    );
+    await sleep(30);
+    await events.get("message_update")(
+      { message: { role: "assistant", content: [thinking, text] } },
+      ctx,
+    );
+    let streamed;
+    do {
+      streamed = await nextEvent();
+    } while (!streamed.patch?.liveGeneration);
+    assert.equal(streamed.patch.liveGeneration.estimatedTokens, 50);
+    assert.equal(
+      streamed.patch.liveGeneration.elapsedMs > 0,
+      true,
+      "生成时长必须大于 0，否则 tok/s 会除以零",
+    );
+
+    await events.get("message_end")(
+      { message: { role: "assistant", content: [thinking, text] } },
+      ctx,
+    );
+    let settled;
+    do {
+      settled = await nextEvent();
+    } while (!settled.patch?.stats || !("liveGeneration" in settled.patch));
+    assert.equal(settled.patch.liveGeneration, null);
+    assert.equal(settled.patch.stats.generation.messages, 1);
+    assert.equal(settled.patch.stats.generation.tokens, 50);
+    assert.equal(settled.patch.stats.generation.ms > 0, true);
+  } finally {
+    await reader?.cancel();
+    await events.get("session_shutdown")();
     await rm(directory, { recursive: true, force: true });
     delete globalThis[Symbol.for("pi-atom-web.reload-handoff")];
   }

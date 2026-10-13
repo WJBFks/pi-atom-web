@@ -10,9 +10,13 @@ function emptyState() {
     schemaVersion: 1,
     toolTimings: {},
     thinkingTimings: {},
+    compactionTimings: {},
+    compactionReasons: {},
     disclosures: {},
     displayRecords: [],
+    steeringDeliveries: [],
     turnProcessing: {},
+    generation: { tokens: 0, ms: 0, messages: 0 },
   };
 }
 
@@ -56,6 +60,40 @@ function turnProcessingMap(value) {
   return result;
 }
 
+/**
+ * 压缩条目的触发原因：key = 压缩 entry 的 id，值 = `"manual" | "threshold" | "overflow"`。
+ * 宿主只在 `session_compact` **事件**上给 reason，落盘的 `CompactionEntry` 没有这个字段；
+ * 而前端要靠它分流：手动压缩是页面边界（不进轮次分组），自动压缩是本轮的一步。
+ */
+function reasonMap(value) {
+  const result = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+  for (const [id, reason] of Object.entries(value).slice(-MAX_ENTRIES))
+    if (
+      id &&
+      id.length <= 1024 &&
+      (reason === "manual" || reason === "threshold" || reason === "overflow")
+    )
+      result[id] = reason;
+  return result;
+}
+
+/**
+ * 会话累计的「正文 + 思考」生成观测（见 extensions/generation-timings.ts）。
+ * 只存累计量，不存每条消息的明细：状态栏要的是平均速度，明细没有消费方。
+ */
+function generationTotals(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return emptyState().generation;
+  const count = (input) =>
+    Number.isFinite(Number(input)) && Number(input) >= 0 ? Number(input) : 0;
+  return {
+    tokens: count(value.tokens),
+    ms: count(value.ms),
+    messages: count(value.messages),
+  };
+}
+
 function normalize(value, sessionId) {
   if (!value || value.schemaVersion !== 1) return emptyState();
   const disclosures = {};
@@ -73,13 +111,29 @@ function normalize(value, sessionId) {
         ["command", "notification", "status", "interrupted"].includes(record.message.role) &&
         typeof record.message.content === "string" && record.message.content.length <= MAX_TEXT)
     : [];
+  // 以「引导」方式送达的用户消息签名（见 extensions/prompt-queue.ts）。
+  // 不存原文，只存 `{hash}:{长度}` 形式的短签名，所以不会泄露 Prompt 内容。
+  const steeringDeliveries = Array.isArray(value.steeringDeliveries)
+    ? value.steeringDeliveries
+        .slice(-MAX_ENTRIES)
+        .filter(
+          (signature) =>
+            typeof signature === "string" &&
+            signature.length > 0 &&
+            signature.length <= 128,
+        )
+    : [];
   return {
     schemaVersion: 1,
     toolTimings: timingMap(value.toolTimings),
     thinkingTimings: timingMap(value.thinkingTimings),
+    compactionTimings: timingMap(value.compactionTimings),
+    compactionReasons: reasonMap(value.compactionReasons),
     disclosures,
     displayRecords,
+    steeringDeliveries,
     turnProcessing: turnProcessingMap(value.turnProcessing),
+    generation: generationTotals(value.generation),
   };
 }
 
